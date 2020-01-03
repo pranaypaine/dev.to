@@ -83,6 +83,12 @@ RSpec.configure do |config|
     Sidekiq::Worker.clear_all # worker jobs shouldn't linger around between tests
   end
 
+  config.around(:each, sidekiq_inline: true) do |example|
+    Sidekiq::Testing.inline! do
+      example.run
+    end
+  end
+
   config.after do
     SiteConfig.clear_cache
   end
