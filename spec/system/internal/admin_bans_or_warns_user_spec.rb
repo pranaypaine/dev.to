@@ -6,7 +6,6 @@ RSpec.describe "Admin bans user", type: :system do
 
   before do
     sign_in admin
-    visit "/internal/users/#{user.id}/edit"
   end
 
   def ban_user
