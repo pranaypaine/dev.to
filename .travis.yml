@@ -46,10 +46,10 @@ script:
   - yarn build-storybook
 after_script:
   addons:
-  artifacts:
-    paths:
-    - /tmp/screenshots/*.rb
-    debug: true
+    artifacts:
+      paths:
+      - /tmp/screenshots/*.rb
+      debug: true
 deploy:
   provider: heroku
   api_key: '$HEROKU_AUTH_TOKEN'
