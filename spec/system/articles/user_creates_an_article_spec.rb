@@ -8,7 +8,7 @@ RSpec.describe "Creating an article with the editor", type: :system do
     sign_in user
   end
 
-  it "creates a new article", js: true, retry: 3 do
+  it "creates a new article", js: true, retry: 0 do
     visit new_path
     fill_in "article_body_markdown", with: template
     click_button "SAVE CHANGES"
