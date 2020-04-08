@@ -1,0 +1,103 @@
+@import '../config/import';
+
+.crayons-link {
+  color: var(--link-color);
+
+  &--branded {
+    color: var(--link-branded-color);
+  }
+
+  &:hover {
+    color: var(--link-color-hover);
+  }
+
+  &--current {
+    font-weight: $fw-medium;
+    color: var(--link-color-current);
+    background: var(--link-bg-current);
+  }
+}
+
+.crayons-link--block {
+  display: flex;
+  align-items: center;
+  padding: $su-3;
+  border-radius: $br-default;
+
+  &:hover {
+    background: var(--link-bg-hover);
+  }
+
+  @media (min-width: $breakpoint-s) {
+    padding: $su-2;
+  }
+
+  .crayons-icon {
+    margin-right: $su-2;
+    vertical-align: middle;
+    width: $su-6;
+    height: $su-6;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: $fs-xl;
+  }
+
+  .crayons-indicator {
+    margin-left: $su-2;
+  }
+
+  // Indented for when there's no icon
+  &--indented {
+    padding-left: $su-2 + $su-7; // 40px
+  }
+}
+
+.crayons-link--contentful {
+  display: block;
+  padding: $su-4;
+  border-bottom: 1px solid var(--body-bg);
+
+  &:last-child {
+    border-bottom: 0;
+    border-bottom-right-radius: $br-default;
+    border-bottom-left-radius: $br-default;
+  }
+
+  .crayons-link__secondary {
+    color: var(--link-color-secondary);
+    font-size: $fs-s;
+    padding-top: $su-1;
+  }
+
+  &:hover {
+    background: var(--link-bg-hover-alt);
+    .crayons-link__secondary {
+      color: var(--link-color-secondary-hover);
+    }
+  }
+}
+
+.crayons-tabs {
+  display: flex;
+
+  .crayons-link {
+    padding: 0 0.5em;
+    position: relative;
+    display: inline-block;
+
+    &--current {
+      background: transparent;
+
+      &::after {
+        position: absolute;
+        left: 0.5em;
+        right: 0.5em;
+        bottom: -2px;
+        height: 2px;
+        content: '';
+        background-color: var(--accent-brand);
+      }
+    }
+  }
+}

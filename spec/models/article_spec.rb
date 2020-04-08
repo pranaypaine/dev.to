@@ -21,7 +21,7 @@ RSpec.describe Article, type: :model do
     it { is_expected.to validate_length_of(:cached_tag_list).is_at_most(126) }
     it { is_expected.to belong_to(:user) }
     it { is_expected.to belong_to(:organization).optional }
-    it { is_expected.to belong_to(:collection).optional.touch(true) }
+    it { is_expected.to belong_to(:collection).optional }
     it { is_expected.to have_many(:comments) }
     it { is_expected.to have_many(:reactions).dependent(:destroy) }
     it { is_expected.to have_many(:notifications).dependent(:delete_all) }
@@ -29,12 +29,80 @@ RSpec.describe Article, type: :model do
     it { is_expected.to validate_presence_of(:user_id) }
     it { is_expected.not_to allow_value("foo").for(:main_image_background_hex_color) }
 
+    describe "#after_commit" do
+      it "on update enqueues job to index article to elasticsearch" do
+        article.save
+        sidekiq_assert_enqueued_with(job: Search::IndexToElasticsearchWorker, args: [described_class.to_s, article.search_id]) do
+          article.save
+        end
+      end
+
+      it "on destroy enqueues job to delete article from elasticsearch" do
+        article = create(:article)
+
+        sidekiq_assert_enqueued_with(job: Search::RemoveFromElasticsearchIndexWorker, args: [described_class::SEARCH_CLASS.to_s, article.search_id]) do
+          article.destroy
+        end
+      end
+
+      it "on update syncs elasticsearch data" do
+        allow(article).to receive(:sync_related_elasticsearch_docs)
+        article.save
+        expect(article).to have_received(:sync_related_elasticsearch_docs)
+      end
+    end
+
+    describe "#after_update_commit" do
+      it "if article is unpublished removes reading list reactions from index" do
+        reaction = create(:reaction, reactable: article, category: "readinglist")
+        sidekiq_perform_enqueued_jobs
+        expect(reaction.elasticsearch_doc).not_to be_nil
+
+        unpublished_body = "---\ntitle: Hellohnnnn#{rand(1000)}\npublished: false\ntags: hiring\n---\n\nHello"
+        article.update(body_markdown: unpublished_body)
+        sidekiq_perform_enqueued_jobs
+        expect { reaction.elasticsearch_doc }.to raise_error(Search::Errors::Transport::NotFound)
+      end
+
+      it "if article is published indexes reading list reactions" do
+        reaction = create(:reaction, reactable: article, category: "readinglist")
+        sidekiq_perform_enqueued_jobs
+        unpublished_body = "---\ntitle: Hellohnnnn#{rand(1000)}\npublished: false\ntags: hiring\n---\n\nHello"
+        article.update(body_markdown: unpublished_body)
+        sidekiq_perform_enqueued_jobs
+        expect { reaction.elasticsearch_doc }.to raise_error(Search::Errors::Transport::NotFound)
+
+        published_body = "---\ntitle: Hellohnnnn#{rand(1000)}\npublished: true\ntags: hiring\n---\n\nHello"
+        article.update(body_markdown: published_body)
+        sidekiq_perform_enqueued_jobs
+        expect(reaction.elasticsearch_doc).not_to be_nil
+      end
+
+      it "indexes reaction if a REACTION_INDEXED_FIELDS is changed" do
+        reaction = create(:reaction, reactable: article, category: "readinglist")
+        allow(article).to receive(:index_to_elasticsearch)
+        allow(article.user).to receive(:index_to_elasticsearch)
+
+        sidekiq_assert_enqueued_with(job: Search::IndexToElasticsearchWorker, args: ["Reaction", reaction.search_id]) do
+          article.update(body_markdown: "---\ntitle: NEW TITLE#{rand(1000)}\n")
+        end
+      end
+    end
+
     context "when published" do
       before do
-        allow(subject).to receive(:published?).and_return(true) # rubocop:disable RSpec/NamedSubject
+        # rubocop:disable RSpec/NamedSubject
+        allow(subject).to receive(:published?).and_return(true)
+        # rubocop:enable RSpec/NamedSubject
       end
 
       it { is_expected.to validate_presence_of(:slug) }
+    end
+
+    describe "#search_id" do
+      it "returns article_ID" do
+        expect(article.search_id).to eq("article_#{article.id}")
+      end
     end
 
     describe "#main_image_background_hex_color" do
@@ -43,6 +111,26 @@ RSpec.describe Article, type: :model do
         expect(article.valid?).to eq(false)
         article.main_image_background_hex_color = "#fff000"
         expect(article.valid?).to eq(true)
+      end
+    end
+
+    describe "#canonical_url_must_not_have_spaces" do
+      let!(:article) { build :article, user: user }
+
+      it "is valid without spaces" do
+        valid_url = "https://www.positronx.io/angular-radio-buttons-example/"
+        article.canonical_url = valid_url
+
+        expect(article).to be_valid
+      end
+
+      it "is not valid with spaces" do
+        invalid_url = "https://www.positronx.io/angular radio-buttons-example/"
+        article.canonical_url = invalid_url
+        messages = ["must not have spaces"]
+
+        expect(article).not_to be_valid
+        expect(article.errors.messages[:canonical_url]).to eq messages
       end
     end
 
@@ -90,11 +178,29 @@ RSpec.describe Article, type: :model do
       end
 
       it "is valid with valid liquid tags", :vcr do
-        VCR.use_cassette("twitter_gem") do
+        VCR.use_cassette("twitter_fetch_status") do
           article = build_and_validate_article(with_tweet_tag: true)
           expect(article).to be_valid
         end
       end
+    end
+
+    describe "tag validation" do
+      let(:article) { build(:article, user: user) }
+
+      # See https://github.com/thepracticaldev/dev.to/pull/6302
+      # rubocop:disable RSpec/VerifiedDoubles
+      it "does not modify the tag list if there are no adjustments" do
+        allow(TagAdjustment).to receive(:where).and_return(TagAdjustment.none)
+        allow(article).to receive(:tag_list).and_return(spy("tag_list"))
+
+        article.save
+
+        # We expect this to happen once in #evaluate_front_matter
+        expect(article.tag_list).to have_received(:add).once
+        expect(article.tag_list).not_to have_received(:remove)
+      end
+      # rubocop:enable RSpec/VerifiedDoubles
     end
   end
 
@@ -205,6 +311,52 @@ RSpec.describe Article, type: :model do
       it "return a sanitized version of processed_html" do
         sanitized_html = ActionView::Base.full_sanitizer.sanitize(test_article.processed_html)
         expect(test_article.body_text).to eq(sanitized_html)
+      end
+    end
+
+    context "when a main_image does not already exist" do
+      let!(:article_without_main_image) { build(:article, with_main_image: false) }
+      let(:image) { Faker::Avatar.image }
+
+      before { article_without_main_image.validate }
+
+      it "can parse the main_image" do
+        expect(article_without_main_image.main_image).to eq(nil)
+      end
+
+      it "can parse the main_image when added" do
+        article_without_main_image.main_image = image
+        article_without_main_image.validate
+
+        expect(article_without_main_image.main_image).to eq(image)
+      end
+    end
+
+    context "when a main_image exists" do
+      # The `with_main_image` flag is the factory default, but we're being explicit here.
+      let!(:article_with_main_image) { build(:article, with_main_image: true) }
+      let(:image) { article_with_main_image.main_image }
+
+      before { article_with_main_image.validate }
+
+      it "can parse the main_image" do
+        expect(article_with_main_image.main_image).to eq(image)
+      end
+
+      it "can parse the main_image when removed" do
+        article_with_main_image.main_image = nil
+        article_with_main_image.validate
+
+        expect(article_with_main_image.main_image).to eq(nil)
+      end
+
+      it "can parse the main_image when changed" do
+        expect(article_with_main_image.main_image).to eq(image)
+
+        other_image = Faker::Avatar.image
+        article_with_main_image.main_image = other_image
+        article_with_main_image.validate
+        expect(article_with_main_image.main_image).to eq(other_image)
       end
     end
   end
@@ -354,6 +506,17 @@ RSpec.describe Article, type: :model do
     it "returns false if the article does not have a frontmatter" do
       article.body_markdown = "Hey hey Ho Ho"
       expect(article.has_frontmatter?).to eq(false)
+    end
+
+    it "returns true if parser raises a Psych::DisallowedClass error" do
+      allow(FrontMatterParser::Parser).to receive(:new).and_raise(Psych::DisallowedClass.new("msg"))
+      expect(article.has_frontmatter?).to eq(true)
+    end
+
+    it "returns true if parser raises a Psych::SyntaxError error" do
+      syntax_error = Psych::SyntaxError.new("file", 1, 1, 0, "problem", "context")
+      allow(FrontMatterParser::Parser).to receive(:new).and_raise(syntax_error)
+      expect(article.has_frontmatter?).to eq(true)
     end
   end
 
@@ -532,6 +695,8 @@ RSpec.describe Article, type: :model do
     end
 
     it "triggers auto removal from index on destroy" do
+      article = create(:article)
+
       allow(article).to receive(:remove_from_index!)
       allow(article).to receive(:delete_related_objects)
       article.destroy
@@ -580,7 +745,7 @@ RSpec.describe Article, type: :model do
       it "enqueues a job to update the main image background if #dddddd" do
         article.main_image_background_hex_color = "#dddddd"
         allow(article).to receive(:update_main_image_background_hex).and_call_original
-        assert_enqueued_with(job: Articles::UpdateMainImageBackgroundHexJob) do
+        sidekiq_assert_enqueued_with(job: Articles::UpdateMainImageBackgroundHexWorker) do
           article.save
         end
         expect(article).to have_received(:update_main_image_background_hex)
@@ -589,7 +754,7 @@ RSpec.describe Article, type: :model do
       it "does not enqueue a job to update the main image background if not #dddddd" do
         article.main_image_background_hex_color = "#fff000"
         allow(article).to receive(:update_main_image_background_hex).and_call_original
-        assert_no_enqueued_jobs(only: Articles::UpdateMainImageBackgroundHexJob) do
+        sidekiq_assert_no_enqueued_jobs(only: Articles::UpdateMainImageBackgroundHexWorker) do
           article.save
         end
         expect(article).to have_received(:update_main_image_background_hex)
@@ -597,32 +762,75 @@ RSpec.describe Article, type: :model do
     end
 
     describe "async score calc" do
-      it "enqueues Articles::ScoreCalcJob if published" do
-        assert_enqueued_with(job: Articles::ScoreCalcJob) do
+      it "enqueues Articles::ScoreCalcWorker if published" do
+        sidekiq_assert_enqueued_with(job: Articles::ScoreCalcWorker, args: [article.id]) do
           article.save
         end
       end
 
-      it "does not enqueue Articles::ScoreCalcJob if not published" do
+      it "does not enqueue Articles::ScoreCalcWorker if not published" do
         article = build(:article, published: false)
-        assert_no_enqueued_jobs(only: Articles::ScoreCalcJob) do
+        sidekiq_assert_no_enqueued_jobs(only: Articles::ScoreCalcWorker) do
           article.save
         end
       end
     end
 
     describe "detect human language" do
+      let(:language_detector) { instance_double(LanguageDetector) }
+
+      before do
+        allow(LanguageDetector).to receive(:new).and_return(language_detector)
+        allow(language_detector).to receive(:detect)
+      end
+
       it "calls the human language detector" do
         article.language = ""
-        assert_enqueued_with(job: Articles::DetectHumanLanguageJob) do
-          article.save
-        end
+        article.save
+
+        expect(language_detector).to have_received(:detect)
       end
 
       it "does not call the human language detector if there is already a language" do
         article.language = "en"
-        assert_no_enqueued_jobs(only: Articles::DetectHumanLanguageJob) do
-          article.save
+        article.save
+
+        expect(language_detector).not_to have_received(:detect)
+      end
+    end
+
+    describe "slack messages" do
+      before do
+        # making sure there are no other enqueued jobs from other tests
+        sidekiq_perform_enqueued_jobs(only: SlackBotPingWorker)
+      end
+
+      it "queues a slack message to be sent" do
+        sidekiq_assert_enqueued_jobs(1, only: SlackBotPingWorker) do
+          article.update(published: true, published_at: Time.current)
+        end
+      end
+
+      it "does not queue a message for an article published more than 30 seconds ago" do
+        Timecop.freeze(Time.current) do
+          sidekiq_assert_no_enqueued_jobs(only: SlackBotPingWorker) do
+            article.update(published: true, published_at: 31.seconds.ago)
+          end
+        end
+      end
+
+      it "does not queue a message for a draft article" do
+        sidekiq_assert_no_enqueued_jobs(only: SlackBotPingWorker) do
+          article.update(body_markdown: "foobar", published: false)
+        end
+      end
+
+      it "queues a message for a draft article that gets published" do
+        Timecop.freeze(Time.current) do
+          sidekiq_assert_enqueued_with(job: SlackBotPingWorker) do
+            article.update_columns(published: false)
+            article.update(published: true, published_at: Time.current)
+          end
         end
       end
     end
@@ -634,6 +842,14 @@ RSpec.describe Article, type: :model do
 
       fields = %w[id tag_list published_at processed_html user_id organization_id title path]
       expect(feed_article.attributes.keys).to match_array(fields)
+    end
+  end
+
+  describe "#touch_by_reaction" do
+    it "reindexes elasticsearch doc" do
+      sidekiq_assert_enqueued_with(job: Search::IndexToElasticsearchWorker, args: [described_class.to_s, article.search_id]) do
+        article.touch_by_reaction
+      end
     end
   end
 end

@@ -1,5 +1,13 @@
 class PodcastEpisode < ApplicationRecord
+  self.ignored_columns = %w[
+    duration_in_seconds
+  ]
+
   include AlgoliaSearch
+  include Searchable
+
+  SEARCH_SERIALIZER = Search::PodcastEpisodeSerializer
+  SEARCH_CLASS = Search::FeedContent
 
   acts_as_taggable
 
@@ -18,16 +26,23 @@ class PodcastEpisode < ApplicationRecord
   validates :media_url, presence: true, uniqueness: true
   validates :guid, presence: true, uniqueness: true
 
+  # NOTE: Any create callbacks will not be run since we use activerecord-import to create episodes
+  # https://github.com/zdennis/activerecord-import#callbacks
   after_update :purge
-  after_create :purge_all
   after_destroy :purge, :purge_all
-  after_save    :bust_cache
+  after_save :bust_cache
+
+  after_commit :index_to_elasticsearch, on: %i[update]
+  after_commit :remove_from_elasticsearch, on: [:destroy]
 
   before_validation :process_html_and_prefix_all_images
 
   scope :reachable, -> { where(reachable: true) }
   scope :published, -> { joins(:podcast).where(podcasts: { published: true }) }
   scope :available, -> { reachable.published }
+  scope :for_user, lambda { |user|
+    joins(:podcast).where(podcasts: { creator_id: user.id })
+  }
 
   algoliasearch per_environment: true do
     attribute :id
@@ -42,7 +57,7 @@ class PodcastEpisode < ApplicationRecord
       attribute :user do
         { name: podcast.name,
           username: user_username,
-          profile_image_90: ProfileImage.new(user).get(90) }
+          profile_image_90: ProfileImage.new(user).get(width: 90) }
       end
       searchableAttributes ["unordered(title)",
                             "body_text",
@@ -54,6 +69,10 @@ class PodcastEpisode < ApplicationRecord
       attributesForFaceting [:class_name]
       customRanking ["desc(search_score)", "desc(hotness_score)"]
     end
+  end
+
+  def search_id
+    "podcast_episode_#{id}"
   end
 
   def user_username
@@ -98,10 +117,6 @@ class PodcastEpisode < ApplicationRecord
     ActionView::Base.full_sanitizer.sanitize(processed_html)
   end
 
-  def published_at_date_slashes
-    published_at&.to_date&.strftime("%m/%d/%Y")
-  end
-
   def user
     podcast
   end
@@ -131,6 +146,14 @@ class PodcastEpisode < ApplicationRecord
 
   def liquid_tags_used
     []
+  end
+
+  def mobile_player_metadata
+    {
+      podcastName: podcast.title,
+      episodeName: title,
+      podcastImageUrl: ApplicationController.helpers.app_url(podcast.image_url)
+    }
   end
 
   private

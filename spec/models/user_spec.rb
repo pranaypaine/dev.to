@@ -33,6 +33,7 @@ RSpec.describe User, type: :model do
       it { is_expected.to have_many(:chat_channels).through(:chat_channel_memberships) }
       it { is_expected.to have_many(:notification_subscriptions).dependent(:destroy) }
       it { is_expected.to have_one(:pro_membership).dependent(:destroy) }
+      it { is_expected.to have_one(:counters).dependent(:destroy) }
 
       # rubocop:disable RSpec/NamedSubject
       it "has created_podcasts" do
@@ -93,6 +94,28 @@ RSpec.describe User, type: :model do
       user = build(:user, username: "page_yo")
       expect(user).not_to be_valid
       expect(user.errors[:username].to_s.include?("taken")).to be true
+    end
+  end
+
+  describe "#after_commit" do
+    it "on update enqueues job to index user to elasticsearch" do
+      user.save
+      sidekiq_assert_enqueued_with(job: Search::IndexToElasticsearchWorker, args: [described_class.to_s, user.id]) do
+        user.save
+      end
+    end
+
+    it "on update syncs elasticsearch data" do
+      allow(user).to receive(:sync_related_elasticsearch_docs)
+      user.save
+      expect(user).to have_received(:sync_related_elasticsearch_docs)
+    end
+
+    it "on destroy enqueues job to delete user from elasticsearch" do
+      user.save
+      sidekiq_assert_enqueued_with(job: Search::RemoveFromElasticsearchIndexWorker, args: [described_class::SEARCH_CLASS.to_s, user.id]) do
+        user.destroy
+      end
     end
   end
 
@@ -184,6 +207,11 @@ RSpec.describe User, type: :model do
 
       it "does not accept invalid mastodon url" do
         user.mastodon_url = "mastodon.social/@test"
+        expect(user).not_to be_valid
+      end
+
+      it "does not accept an invalid url" do
+        user.mastodon_url = "ben .com"
         expect(user).not_to be_valid
       end
     end
@@ -433,7 +461,7 @@ RSpec.describe User, type: :model do
       end
 
       it "sets correct language_settings by default after the jobs are processed" do
-        perform_enqueued_jobs do
+        sidekiq_perform_enqueued_jobs do
           expect(user.language_settings).to eq("preferred_languages" => %w[en])
         end
       end
@@ -441,32 +469,68 @@ RSpec.describe User, type: :model do
 
     describe "#estimated_default_language" do
       it "estimates default language to be nil" do
-        perform_enqueued_jobs do
+        sidekiq_perform_enqueued_jobs do
           expect(user.estimated_default_language).to be(nil)
         end
       end
 
       it "estimates default language to be japanese with .jp email" do
-        perform_enqueued_jobs do
+        user = nil
+
+        sidekiq_perform_enqueued_jobs do
           user = create(:user, email: "ben@hello.jp")
-          expect(user.reload.estimated_default_language).to eq("ja")
         end
+
+        expect(user.reload.estimated_default_language).to eq("ja")
       end
 
       it "estimates default language based on ID dump" do
-        perform_enqueued_jobs do
+        new_user = nil
+
+        sidekiq_perform_enqueued_jobs do
           new_user = user_from_authorization_service(:twitter, nil, "navbar_basic")
-          expect(new_user.estimated_default_language).to eq(nil)
         end
+
+        expect(new_user.estimated_default_language).to eq(nil)
+      end
+    end
+
+    describe "#send_welcome_notification" do
+      let(:mascot_account) { create(:user) }
+      let!(:set_up_profile_broadcast) { create(:set_up_profile_broadcast) }
+
+      before do
+        allow(described_class).to receive(:mascot_account).and_return(mascot_account)
+      end
+
+      it "sends a setup welcome notification when an active broadcast exists" do
+        new_user = nil
+        sidekiq_perform_enqueued_jobs do
+          new_user = create(:user)
+        end
+        expect(new_user.reload.notifications.count).to eq(1)
+        expect(new_user.reload.notifications.first.notifiable).to eq(set_up_profile_broadcast)
+      end
+
+      it "does not send a setup welcome notification without an active broadcast" do
+        set_up_profile_broadcast.update!(active: false)
+        new_user = nil
+        sidekiq_perform_enqueued_jobs do
+          new_user = create(:user)
+        end
+        expect(new_user.reload.notifications.count).to eq(0)
       end
     end
 
     describe "#preferred_languages_array" do
       it "returns proper preferred_languages_array" do
-        perform_enqueued_jobs do
+        user = nil
+
+        sidekiq_perform_enqueued_jobs do
           user = create(:user, email: "ben@hello.jp")
-          expect(user.reload.preferred_languages_array).to eq(%w[en ja])
         end
+
+        expect(user.reload.preferred_languages_array).to eq(%w[en ja])
       end
 
       it "returns a correct array when language settings are in a new format" do
@@ -513,6 +577,15 @@ RSpec.describe User, type: :model do
       it "does not enqueue with an unconfirmed email" do
         sidekiq_assert_no_enqueued_jobs(only: Users::SubscribeToMailchimpNewsletterWorker) do
           user.update(unconfirmed_email: "bob@bob.com", confirmation_sent_at: Time.current)
+        end
+      end
+
+      it "does not enqueue when the email address or subscription status has not changed" do
+        # The trait replaces the method with a dummy, but we need the actual method for this test.
+        user = described_class.find(create(:user, :ignore_mailchimp_subscribe_callback).id)
+
+        sidekiq_assert_no_enqueued_jobs(only: Users::SubscribeToMailchimpNewsletterWorker) do
+          user.update(website_url: "http://example.com")
         end
       end
     end
@@ -915,6 +988,30 @@ RSpec.describe User, type: :model do
     it "returns true if user opted in from follower notifications and has an email" do
       user.assign_attributes(email_follower_notifications: true)
       expect(user.receives_follower_email_notifications?).to be(true)
+    end
+  end
+
+  describe ".dev_account" do
+    it "returns nil if the account does not exist" do
+      expect(described_class.dev_account).to be_nil
+    end
+
+    it "returns the user if the account exists" do
+      allow(SiteConfig).to receive(:staff_user_id).and_return(user.id)
+
+      expect(described_class.dev_account).to eq(user)
+    end
+  end
+
+  describe ".mascot_account" do
+    it "returns nil if the account does not exist" do
+      expect(described_class.mascot_account).to be_nil
+    end
+
+    it "returns the user if the account exists" do
+      allow(SiteConfig).to receive(:mascot_user_id).and_return(user.id)
+
+      expect(described_class.mascot_account).to eq(user)
     end
   end
 end

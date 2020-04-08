@@ -19,8 +19,10 @@ module Moderator
       delete_user_activity
       delete_comments
       delete_articles
+      Users::CleanupChatChannels.call(user)
       user.remove_from_algolia_index
       reassign_and_bust_username
+      delete_vomit_reactions
     end
 
     private
@@ -47,6 +49,10 @@ module Moderator
       )
 
       user.update_columns(profile_image: "https://thepracticaldev.s3.amazonaws.com/i/99mvlsfu5tfj9m7ku25d.png")
+    end
+
+    def delete_vomit_reactions
+      Reaction.where(reactable: user, category: "vomit").delete_all
     end
   end
 end

@@ -11,9 +11,10 @@ RSpec/DescribeClass:
   Exclude:
     - spec/requests/**/*
     - spec/system/**/*
+    - spec/tasks/**/*
 
 RSpec/ExampleLength:
-  Max: 10
+  Max: 15
 
 #############################
 
@@ -153,6 +154,9 @@ Style/TrailingCommaInArrayLiteral:
   StyleGuide: 'https://github.com/bbatsov/ruby-style-guide#no-trailing-array-commas'
   EnforcedStyleForMultiline: comma
   Enabled: true
+
+Rails/FilePath:
+  EnforcedStyle: slashes
 
 # Layout
 

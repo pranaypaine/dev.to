@@ -6,9 +6,15 @@ class User < ApplicationRecord
     :add_credits, :remove_credits, :add_org_credits, :remove_org_credits, :ghostify
   )
 
-  rolify
+  rolify after_add: :index_roles, after_remove: :index_roles
+
   include AlgoliaSearch
   include Storext.model
+  include Searchable
+
+  SEARCH_SERIALIZER = Search::UserSerializer
+  SEARCH_CLASS = Search::User
+  DATA_SYNC_CLASS = DataSync::Elasticsearch::User
 
   acts_as_followable
   acts_as_follower
@@ -22,6 +28,7 @@ class User < ApplicationRecord
   has_many :collections, dependent: :destroy
   has_many :comments, dependent: :destroy
   has_many :email_messages, class_name: "Ahoy::Message", dependent: :destroy
+  has_many :email_authorizations, dependent: :delete_all
   has_many :github_repos, dependent: :destroy
   has_many :identities, dependent: :destroy
   has_many :mentions, dependent: :destroy
@@ -41,10 +48,11 @@ class User < ApplicationRecord
   has_many :affected_feedback_messages, class_name: "FeedbackMessage", inverse_of: :affected, foreign_key: :affected_id, dependent: :nullify
 
   has_many :rating_votes, dependent: :destroy
+  has_many :response_templates, foreign_key: :user_id, inverse_of: :user, dependent: :destroy
   has_many :html_variants, dependent: :destroy
   has_many :page_views, dependent: :destroy
   has_many :credits, dependent: :destroy
-  has_many :classified_listings
+  has_many :classified_listings, dependent: :destroy
   has_many :poll_votes, dependent: :destroy
   has_many :poll_skips, dependent: :destroy
   has_many :backup_data, foreign_key: "instance_user_id", inverse_of: :instance_user, class_name: "BackupData", dependent: :delete_all
@@ -55,6 +63,7 @@ class User < ApplicationRecord
   has_many :blocker_blocks, class_name: "UserBlock", foreign_key: :blocker_id, inverse_of: :blocker, dependent: :delete_all
   has_many :blocked_blocks, class_name: "UserBlock", foreign_key: :blocked_id, inverse_of: :blocked, dependent: :delete_all
   has_one :pro_membership, dependent: :destroy
+  has_one :counters, class_name: "UserCounter", dependent: :destroy
   has_many :created_podcasts, class_name: "Podcast", foreign_key: :creator_id, inverse_of: :creator, dependent: :nullify
 
   mount_uploader :profile_image, ProfileImageUploader
@@ -78,7 +87,7 @@ class User < ApplicationRecord
   validates :experience_level, numericality: { less_than_or_equal_to: 10 }, allow_blank: true
   validates :text_color_hex, format: /\A#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})\z/, allow_blank: true
   validates :bg_color_hex, format: /\A#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})\z/, allow_blank: true
-  validates :website_url, :employer_url, :mastodon_url,
+  validates :website_url, :employer_url,
             url: { allow_blank: true, no_local: true, schemes: %w[https http] }
   validates :facebook_url,
             format: /\A(http(s)?:\/\/)?(www.facebook.com|facebook.com)\/.*\Z/,
@@ -109,18 +118,6 @@ class User < ApplicationRecord
   validates :twitch_url,
             allow_blank: true,
             format: /\A(http(s)?:\/\/)?(www.twitch.tv|twitch.tv)\/.*\Z/
-  validates :shirt_gender,
-            inclusion: { in: %w[unisex womens],
-                         message: "%<value>s is not a valid shirt style" },
-            allow_blank: true
-  validates :shirt_size,
-            inclusion: { in: %w[xs s m l xl 2xl 3xl 4xl],
-                         message: "%<value>s is not a valid size" },
-            allow_blank: true
-  validates :tabs_or_spaces,
-            inclusion: { in: %w[tabs spaces],
-                         message: "%<value>s is not a valid answer" },
-            allow_blank: true
   validates :editor_version,
             inclusion: { in: %w[v1 v2],
                          message: "%<value>s must be either v1 or v2" }
@@ -134,9 +131,6 @@ class User < ApplicationRecord
   validates :config_navbar,
             inclusion: { in: %w[default static],
                          message: "%<value>s is not a valid navbar value" }
-  validates :shipping_country,
-            length: { in: 2..2 },
-            allow_blank: true
   validates :website_url, :employer_name, :employer_url,
             length: { maximum: 100 }
   validates :employment_title, :education, :location,
@@ -153,13 +147,23 @@ class User < ApplicationRecord
   validate  :non_banished_username, :username_changed?
   validate  :unique_including_orgs_and_podcasts, if: :username_changed?
 
-  scope :dev_account, -> { find_by(id: SiteConfig.staff_user_id) }
+  alias_attribute :positive_reactions_count, :reactions_count
+  alias_attribute :subscribed_to_welcome_notifications?, :welcome_notifications
 
-  after_create_commit :send_welcome_notification
-  after_save  :bust_cache
-  after_save  :subscribe_to_mailchimp_newsletter
-  after_save  :conditionally_resave_articles
-  after_create :estimate_default_language
+  scope :with_this_week_comments, lambda { |number|
+    includes(:counters).joins(:counters).where("(user_counters.data -> 'comments_these_7_days')::int >= ?", number)
+  }
+  scope :with_previous_week_comments, lambda { |number|
+    includes(:counters).joins(:counters).where("(user_counters.data -> 'comments_prior_7_days')::int >= ?", number)
+  }
+  scope :top_commenters, lambda { |number = 10|
+    includes(:counters).order(Arel.sql("user_counters.data -> 'comments_these_7_days' DESC")).limit(number)
+  }
+
+  after_save :bust_cache
+  after_save :subscribe_to_mailchimp_newsletter
+  after_save :conditionally_resave_articles
+
   before_create :set_default_language
   before_validation :set_username
   # make sure usernames are not empty, to be able to use the database unique index
@@ -171,6 +175,11 @@ class User < ApplicationRecord
   before_destroy :destroy_empty_dm_channels, prepend: true
   before_destroy :destroy_follows, prepend: true
   before_destroy :unsubscribe_from_newsletters, prepend: true
+
+  after_create_commit :send_welcome_notification, :estimate_default_language
+  after_commit :index_to_elasticsearch, on: %i[create update]
+  after_commit :sync_related_elasticsearch_docs, on: %i[create update]
+  after_commit :remove_from_elasticsearch, on: [:destroy]
 
   algoliasearch per_environment: true, enqueue: :trigger_delayed_index do
     attribute :name
@@ -203,14 +212,22 @@ class User < ApplicationRecord
     end
   end
 
-  def estimated_default_language
-    language_settings["estimated_default_language"]
-  end
-
   def self.trigger_delayed_index(record, remove)
     return if remove
 
     Search::IndexWorker.perform_async("User", record.id)
+  end
+
+  def self.dev_account
+    find_by(id: SiteConfig.staff_user_id)
+  end
+
+  def self.mascot_account
+    find_by(id: SiteConfig.mascot_user_id)
+  end
+
+  def estimated_default_language
+    language_settings["estimated_default_language"]
   end
 
   def tag_line
@@ -238,29 +255,23 @@ class User < ApplicationRecord
   end
 
   def cached_following_users_ids
-    Rails.cache.fetch(
-      "user-#{id}-#{last_followed_at}-#{following_users_count}/following_users_ids",
-      expires_in: 12.hours,
-    ) do
-      Follow.where(follower_id: id, followable_type: "User").limit(150).pluck(:followable_id)
+    cache_key = "user-#{id}-#{last_followed_at}-#{following_users_count}/following_users_ids"
+    Rails.cache.fetch(cache_key, expires_in: 12.hours) do
+      Follow.follower_user(id).limit(150).pluck(:followable_id)
     end
   end
 
   def cached_following_organizations_ids
-    Rails.cache.fetch(
-      "user-#{id}-#{last_followed_at}-#{following_orgs_count}/following_organizations_ids",
-      expires_in: 12.hours,
-    ) do
-      Follow.where(follower_id: id, followable_type: "Organization").limit(150).pluck(:followable_id)
+    cache_key = "user-#{id}-#{last_followed_at}-#{following_orgs_count}/following_organizations_ids"
+    Rails.cache.fetch(cache_key, expires_in: 12.hours) do
+      Follow.follower_organization(id).limit(150).pluck(:followable_id)
     end
   end
 
   def cached_following_podcasts_ids
-    Rails.cache.fetch(
-      "user-#{id}-#{last_followed_at}/following_podcasts_ids",
-      expires_in: 12.hours,
-    ) do
-      Follow.where(follower_id: id, followable_type: "Podcast").pluck(:followable_id)
+    cache_key = "user-#{id}-#{last_followed_at}/following_podcasts_ids"
+    Rails.cache.fetch(cache_key, expires_in: 12.hours) do
+      Follow.follower_podcast(id).pluck(:followable_id)
     end
   end
 
@@ -328,6 +339,10 @@ class User < ApplicationRecord
     end
   end
 
+  def vomitted_on?
+    Reaction.exists?(reactable_id: id, reactable_type: "User", category: "vomit", status: "confirmed")
+  end
+
   def trusted
     Rails.cache.fetch("user-#{id}/has_trusted_role", expires_in: 200.hours) do
       has_role? :trusted
@@ -339,11 +354,6 @@ class User < ApplicationRecord
       tag_ids = roles.where(name: "tag_moderator").pluck(:resource_id)
       Tag.where(id: tag_ids).pluck(:name)
     end
-  end
-
-  def scholar
-    valid_pass = workshop_expiration.nil? || workshop_expiration > Time.current
-    has_role?(:workshop_pass) && valid_pass
   end
 
   def comment_banned
@@ -398,9 +408,14 @@ class User < ApplicationRecord
     errors.add(:username, "has been banished.") if BanishedUser.exists?(username: username)
   end
 
+  def banished?
+    username.starts_with?("spam_")
+  end
+
   def subscribe_to_mailchimp_newsletter
     return unless email.present? && email.include?("@")
     return if saved_changes["unconfirmed_email"] && saved_changes["confirmation_sent_at"]
+    return unless saved_changes.key?(:email) || saved_changes.key?(:email_newsletter)
 
     Users::SubscribeToMailchimpNewsletterWorker.perform_async(id)
   end
@@ -434,7 +449,7 @@ class User < ApplicationRecord
   end
 
   def profile_image_90
-    ProfileImage.new(self).get(90)
+    ProfileImage.new(self).get(width: 90)
   end
 
   def remove_from_algolia_index
@@ -443,7 +458,13 @@ class User < ApplicationRecord
   end
 
   def unsubscribe_from_newsletters
+    return if email.blank?
+
     MailchimpBot.new(self).unsubscribe_all_newsletters
+  end
+
+  def auditable?
+    trusted || tag_moderator? || any_admin?
   end
 
   def tag_moderator?
@@ -467,6 +488,14 @@ class User < ApplicationRecord
       email_follower_notifications
   end
 
+  def title
+    name
+  end
+
+  def hotness_score
+    search_score
+  end
+
   private
 
   def index_id
@@ -474,7 +503,7 @@ class User < ApplicationRecord
   end
 
   def estimate_default_language
-    Users::EstimateDefaultLanguageJob.perform_later(id)
+    Users::EstimateDefaultLanguageWorker.perform_async(id)
   end
 
   def set_default_language
@@ -482,7 +511,9 @@ class User < ApplicationRecord
   end
 
   def send_welcome_notification
-    Notification.send_welcome_notification(id)
+    return unless (set_up_profile_broadcast = Broadcast.active.find_by(title: "Welcome Notification: set_up_profile"))
+
+    Notification.send_welcome_notification(id, set_up_profile_broadcast.id)
   end
 
   def verify_twitter_username
@@ -590,10 +621,8 @@ class User < ApplicationRecord
     return if uri.host&.in?(Constants::ALLOWED_MASTODON_INSTANCES)
 
     errors.add(:mastodon_url, "is not an allowed Mastodon instance")
-  end
-
-  def title
-    name
+  rescue URI::InvalidURIError
+    errors.add(:mastodon_url, "is not a valid url")
   end
 
   def tag_list
@@ -613,10 +642,6 @@ class User < ApplicationRecord
   def published_at; end
 
   def featured_number; end
-
-  def positive_reactions_count
-    reactions_count
-  end
 
   def user
     self
@@ -646,10 +671,6 @@ class User < ApplicationRecord
     employer_name.to_s + mostly_work_with.to_s + available_for.to_s
   end
 
-  def hotness_score
-    search_score
-  end
-
   def search_score
     counts_score = (articles_count + comments_count + reactions_count + badge_achievements_count) * 10
     score = (counts_score + tag_keywords_for_search.size) * reputation_modifier
@@ -666,8 +687,12 @@ class User < ApplicationRecord
   end
 
   def destroy_follows
-    follower_relationships = Follow.where(followable_id: id, followable_type: "User")
+    follower_relationships = Follow.followable_user(id)
     follower_relationships.destroy_all
     follows.destroy_all
+  end
+
+  def index_roles(_role)
+    index_to_elasticsearch_inline
   end
 end
