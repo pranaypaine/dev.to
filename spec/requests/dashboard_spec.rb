@@ -7,6 +7,7 @@ RSpec.describe "Dashboards", type: :request do
   let(:pro_user)      { create(:user, :pro) }
   let(:article)       { create(:article, user: user) }
   let(:unpublished_article) { create(:article, user: user, published: false) }
+  let(:organization) { create(:organization) }
 
   describe "GET /dashboard" do
     context "when not logged in" do
@@ -29,13 +30,45 @@ RSpec.describe "Dashboards", type: :request do
 
       it 'does not show "STATS" for articles' do
         get "/dashboard"
-        expect(response.body).not_to include("STATS")
+        expect(response.body).not_to include("Stats")
       end
 
       it "renders the delete button for drafts" do
         unpublished_article
         get "/dashboard"
-        expect(response.body).to include "DELETE"
+        expect(response.body).to include "Delete"
+      end
+
+      it "renders pagination if minimum amount of posts" do
+        create_list(:article, 52, user: user)
+        get "/dashboard"
+        expect(response.body).to include "pagination"
+      end
+
+      it "does not render pagination if less than one full page" do
+        create_list(:article, 3, user: user)
+        get "/dashboard"
+        expect(response.body).not_to include "pagination"
+      end
+
+      it "does not render a link to pro analytics" do
+        get dashboard_path
+
+        expect(response.body).not_to include("Pro Analytics")
+      end
+
+      it "does not render a link to pro analytics for the org" do
+        create(:organization_membership, type_of_user: :admin, organization: organization, user: user)
+
+        get dashboard_path
+
+        expect(response.body).not_to include("Pro Analytics for #{organization.name}")
+      end
+
+      it "does not render a link to upload a video" do
+        get dashboard_path
+
+        expect(response.body).not_to include("Upload a video")
       end
     end
 
@@ -54,8 +87,37 @@ RSpec.describe "Dashboards", type: :request do
         article = create(:article, user: pro_user)
         sign_in pro_user
         get "/dashboard"
-        expect(response.body).to include("STATS")
+        expect(response.body).to include("Stats")
         expect(response.body).to include("#{article.path}/stats")
+      end
+
+      it "renders a link to pro analytics" do
+        sign_in pro_user
+        get dashboard_path
+
+        expect(response.body).to include("Pro Analytics")
+      end
+
+      it "renders a link to pro analytics for the org" do
+        create(:organization_membership, type_of_user: :admin, organization: organization, user: pro_user)
+
+        sign_in pro_user
+        get dashboard_path
+
+        expect(response.body).to include("Pro Analytics for #{organization.name}")
+      end
+    end
+
+    context "when logged in as a non recent user" do
+      it "renders a link to upload a video" do
+        Timecop.freeze(Time.current) do
+          user.update!(created_at: 3.weeks.ago)
+
+          sign_in user
+          get dashboard_path
+
+          expect(response.body).to include("Upload a video")
+        end
       end
     end
   end
@@ -76,7 +138,7 @@ RSpec.describe "Dashboards", type: :request do
         article.update(organization_id: organization.id)
         sign_in user
         get "/dashboard/organization/#{organization.id}"
-        expect(response.body).to include "dashboard-collection-org-details"
+        expect(response.body).to include "crayons-logo"
       end
 
       it "does not render the delete button for other org member's drafts" do
@@ -85,7 +147,7 @@ RSpec.describe "Dashboards", type: :request do
         unpublished_article.update(organization_id: organization.id)
         sign_in second_user
         get "/dashboard/organization/#{organization.id}"
-        expect(response.body).not_to include("DELETE")
+        expect(response.body).not_to include("Delete")
         expect(response.body).to include(ERB::Util.html_escape(unpublished_article.title))
       end
     end
@@ -108,7 +170,7 @@ RSpec.describe "Dashboards", type: :request do
       end
 
       it "renders followed users count" do
-        expect(response.body).to include "users (1)"
+        expect(response.body).to include "Following users (1)"
       end
 
       it "lists followed users" do
@@ -127,7 +189,7 @@ RSpec.describe "Dashboards", type: :request do
       end
 
       it "renders followed tags count" do
-        expect(response.body).to include "tags (1)"
+        expect(response.body).to include "Following tags (1)"
       end
 
       it "lists followed tags" do
@@ -146,7 +208,7 @@ RSpec.describe "Dashboards", type: :request do
       end
 
       it "renders followed organizations count" do
-        expect(response.body).to include "organizations (1)"
+        expect(response.body).to include "Following organizations (1)"
       end
 
       it "lists followed organizations" do
@@ -165,7 +227,7 @@ RSpec.describe "Dashboards", type: :request do
       end
 
       it "renders followed podcast count" do
-        expect(response.body).to include "podcasts (1)"
+        expect(response.body).to include "Following podcasts (1)"
       end
 
       it "lists followed podcasts" do
@@ -216,21 +278,12 @@ RSpec.describe "Dashboards", type: :request do
       end
     end
 
-    context "when user has a pro membership" do
-      it "shows page properly" do
-        create(:pro_membership, user: user)
-        sign_in user
-        get "/dashboard/pro"
-        expect(response.body).to include("pro")
-      end
-    end
-
     context "when user has pro permission and is an org admin" do
       it "shows page properly" do
         org = create :organization
         create(:organization_membership, user: user, organization: org, type_of_user: "admin")
         user.add_role(:pro)
-        login_as user
+        sign_in user
         get "/dashboard/pro/org/#{org.id}"
         expect(response.body).to include("pro")
       end

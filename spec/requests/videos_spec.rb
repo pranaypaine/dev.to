@@ -2,12 +2,12 @@ require "rails_helper"
 
 RSpec.describe "Videos", type: :request do
   let(:unauthorized_user) { create(:user) }
-  let(:authorized_user)   { create(:user, :video_permission) }
+  let(:authorized_user)   { create(:user, created_at: 1.month.ago) }
 
   describe "GET /videos" do
     it "shows video page" do
       get "/videos"
-      expect(response.body).to include "DEV on Video"
+      expect(response.body).to include "#{community_name} on Video"
     end
 
     it "shows articles with video" do

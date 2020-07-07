@@ -1,94 +1,130 @@
 const { createLocalVideoTrack, connect } = require('twilio-video');
 const root = document.getElementById('videochat');
+const remoteMedia = document.getElementById('remote-media');
 const muteButton = document.getElementById('mute-toggle');
 const videoToggleButton = document.getElementById('videohide-toggle');
-let numConnected = 0;
-connect(root.dataset.token, { name: 'room-name', audio: true, type: 'peer-to-peer', video: { width: 640 } }).then(room => {
+const localMediaContainer = document.getElementById('local-media');
+const roomType = document.getElementById('room-type').dataset.type; //Group
+
+connect(root.dataset.token, {
+  name: 'room-name',
+  audio: true,
+  type: roomType,
+  video: { width: 800 },
+}).then((room) => {
   room.participants.forEach(participantConnected);
   room.on('participantConnected', participantConnected);
 
   room.on('participantDisconnected', participantDisconnected);
-  room.once('disconnected', error => room.participants.forEach(participantDisconnected));
-  console.log(room.participants.length)
-  muteButton.onclick = function(e) {
+  room.once('disconnected', (_error) =>
+    room.participants.forEach(participantDisconnected),
+  );
+  muteButton.onclick = function (e) {
     e.preventDefault();
-    room.localParticipant.audioTracks.forEach(function(trackPub) {
+    room.localParticipant.audioTracks.forEach(function (trackPub) {
       if (muteButton.dataset.muted === 'true') {
-        muteButton.dataset.muted = 'false'
-        muteButton.classList.remove('active');
+        muteButton.dataset.muted = 'false';
+        muteButton.classList.remove('crayons-btn--danger');
+        muteButton.innerHTML = 'Mute';
         trackPub.track.enable();
       } else {
-        muteButton.dataset.muted = 'true'
-        muteButton.classList.add('active');
+        muteButton.dataset.muted = 'true';
+        muteButton.classList.add('crayons-btn--danger');
+        muteButton.innerHTML = 'Unmute';
         trackPub.track.disable();
       }
-    });  
-  }
+    });
+  };
 
-  videoToggleButton.onclick = function(e) {
+  videoToggleButton.onclick = function (e) {
     e.preventDefault();
-    room.localParticipant.videoTracks.forEach(function(trackPub) {
+    room.localParticipant.videoTracks.forEach(function (trackPub) {
       if (videoToggleButton.dataset.hidden === 'true') {
-        videoToggleButton.dataset.hidden = 'false'
-        videoToggleButton.classList.remove('active');
+        videoToggleButton.dataset.hidden = 'false';
+        videoToggleButton.classList.remove('crayons-btn--danger');
+        videoToggleButton.innerHTML = 'Hide';
+        localMediaContainer.classList.remove('video-hidden');
         trackPub.track.enable();
       } else {
-        videoToggleButton.dataset.hidden = 'true'
-        videoToggleButton.classList.add('active');
+        videoToggleButton.dataset.hidden = 'true';
+        videoToggleButton.classList.add('crayons-btn--danger');
+        videoToggleButton.innerHTML = 'Unhide';
+        localMediaContainer.classList.add('video-hidden');
         trackPub.track.disable();
       }
-    });  
-  }
-
+    });
+  };
 });
 
-
-createLocalVideoTrack().then(track => {
-  const localMediaContainer = document.getElementById('local-media');
+createLocalVideoTrack().then((track) => {
   localMediaContainer.appendChild(track.attach());
-
+  document.getElementById('video-controls').classList.add('showing');
 });
-
 
 function participantConnected(participant) {
+  const numExistingDivs = document.getElementsByClassName('individual-video')
+    .length;
   const div = document.createElement('div');
   div.id = participant.sid;
-  div.className = "individual-video"
-  div.innerHTML = '<div class="participant-name">'+ participant.identity + '</div>'
+  div.className = `individual-video${
+    numExistingDivs > 3 ? ' one-of-many-videos' : ''
+  }`;
+  div.innerHTML = `<div class="participant-info">\
+      <div class="participant-name">${participant.identity}</div>\
+      <div class="disabled-audio-indicator">audio off</div>\
+      <div class="disabled-video-indicator">video off</div>\
+    </div>`;
 
-  participant.on('trackSubscribed', track => trackSubscribed(div, track));
+  participant.on('trackSubscribed', (track) => trackSubscribed(div, track));
   participant.on('trackUnsubscribed', trackUnsubscribed);
 
-  participant.tracks.forEach(publication => {
+  participant.on('trackDisabled', (track) => trackDisabled(div, track));
+  participant.on('trackEnabled', (track) => trackEnabled(div, track));
+
+  participant.tracks.forEach((publication) => {
     if (publication.isSubscribed) {
       trackSubscribed(div, publication.track);
     }
   });
-  root.appendChild(div);
-  numConnected += 1;
-  let gridStyle = 'one-per';
-  if (numConnected > 2) {
-    gridStyle = 'two-per';
-  }
-  if (numConnected > 6) {
-    gridStyle = 'three-per';
-  }
-  if (numConnected > 9) {
-    gridStyle = 'four-per';
-  }
-  root.className = 'video-chat-wrapper video-chat-wrapper-num-' + gridStyle;
+  remoteMedia.appendChild(div);
 }
 
 function participantDisconnected(participant) {
-  console.log('Participant "%s" disconnected', participant.identity);
   document.getElementById(participant.sid).remove();
 }
 
 function trackSubscribed(div, track) {
   div.appendChild(track.attach());
+  if (!track.isEnabled) {
+    if (track.kind === 'video') {
+      div.classList.add('disabled-video');
+    } else {
+      div.classList.add('disabled-audio');
+    }
+  }
 }
 
 function trackUnsubscribed(track) {
-  track.detach().forEach(element => element.remove());
+  track.detach().forEach((element) => element.remove());
 }
 
+function trackDisabled(div, track) {
+  if (track.kind === 'video') {
+    div.classList.add('disabled-video');
+  } else {
+    div.classList.add('disabled-audio');
+  }
+}
+
+function trackEnabled(div, track) {
+  if (track.kind === 'video') {
+    div.classList.remove('disabled-video');
+  } else {
+    div.classList.remove('disabled-audio');
+  }
+}
+
+if (navigator.userAgent === 'DEV-Native-ios') {
+  root.innerHTML =
+    '<h2 class="platform-unavailable-message">This feature is not yet available on iPhone</h2>';
+}

@@ -5,19 +5,25 @@ class ChatChannelMembership < ApplicationRecord
   SEARCH_SERIALIZER = Search::ChatChannelMembershipSerializer
   SEARCH_CLASS = Search::ChatChannelMembership
 
+  ROLES = %w[member mod].freeze
+  STATUSES = %w[active inactive pending rejected left_channel removed_from_channel joining_request].freeze
+
   belongs_to :chat_channel
   belongs_to :user
 
-  validates :user_id, presence: true, uniqueness: { scope: :chat_channel_id }
   validates :chat_channel_id, presence: true, uniqueness: { scope: :user_id }
-  validates :status, inclusion: { in: %w[active inactive pending rejected left_channel removed_from_channel] }
-  validates :role, inclusion: { in: %w[member mod] }
+  validates :role, inclusion: { in: ROLES }
+  validates :status, inclusion: { in: STATUSES }
+  validates :user_id, presence: true
+
   validate  :permission
 
   after_commit :index_to_elasticsearch, on: %i[create update]
   after_commit :remove_from_elasticsearch, on: [:destroy]
 
   delegate :channel_type, to: :chat_channel
+
+  scope :eager_load_serialized_data, -> { includes(:user, :channel) }
 
   def channel_last_message_at
     chat_channel.last_message_at
@@ -68,6 +74,10 @@ class ChatChannelMembership < ApplicationRecord
     user_id
   end
 
+  def channel_discoverable
+    chat_channel.discoverable
+  end
+
   private
 
   def channel_color
@@ -83,7 +93,11 @@ class ChatChannelMembership < ApplicationRecord
   end
 
   def permission
-    errors.add(:user_id, "is not allowed in chat") if chat_channel.direct? && chat_channel.slug.split("/").exclude?(user.username)
+    return unless chat_channel
+    return unless chat_channel.direct? && chat_channel.slug.split("/").exclude?(user.username)
+
+    errors.add(:user_id, "is not allowed in chat")
+
     # To be possibly implemented in future
     # if chat_channel.users.size > 128
     #   errors.add(:base, "too many members in channel")

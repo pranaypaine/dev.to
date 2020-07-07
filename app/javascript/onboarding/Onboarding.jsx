@@ -1,13 +1,12 @@
 import 'preact/devtools';
 import { h, Component } from 'preact';
+import PropTypes from 'prop-types';
 
 import IntroSlide from './components/IntroSlide';
-import PersonalInfoForm from './components/PersonalInfoForm';
-import EmailListTermsConditionsForm from './components/EmailListTermsConditionsForm';
-import ClosingSlide from './components/ClosingSlide';
+import EmailPreferencesForm from './components/EmailPreferencesForm';
 import FollowTags from './components/FollowTags';
 import FollowUsers from './components/FollowUsers';
-import BioForm from './components/BioForm';
+import ProfileForm from './components/ProfileForm';
 
 export default class Onboarding extends Component {
   constructor(props) {
@@ -16,30 +15,32 @@ export default class Onboarding extends Component {
     const url = new URL(window.location);
     const previousLocation = url.searchParams.get('referrer');
 
-    this.nextSlide = this.nextSlide.bind(this);
-    this.prevSlide = this.prevSlide.bind(this);
-
     const slides = [
       IntroSlide,
-      EmailListTermsConditionsForm,
-      BioForm,
-      PersonalInfoForm,
       FollowTags,
+      ProfileForm,
       FollowUsers,
-      ClosingSlide,
+      EmailPreferencesForm,
     ];
 
-    this.slides = slides.map((SlideComponent) => (
-      <SlideComponent
-        next={this.nextSlide}
-        prev={this.prevSlide}
-        previousLocation={previousLocation}
-      />
-    ));
+    this.nextSlide = this.nextSlide.bind(this);
+    this.prevSlide = this.prevSlide.bind(this);
+    this.slidesCount = slides.length;
 
     this.state = {
       currentSlide: 0,
     };
+
+    this.slides = slides.map((SlideComponent, index) => (
+      <SlideComponent
+        next={this.nextSlide}
+        prev={this.prevSlide}
+        slidesCount={this.slidesCount}
+        currentSlideIndex={index}
+        communityConfig={props.communityConfig}
+        previousLocation={previousLocation}
+      />
+    ));
   }
 
   nextSlide() {
@@ -49,6 +50,9 @@ export default class Onboarding extends Component {
       this.setState({
         currentSlide: nextSlide,
       });
+    } else {
+      // Redirect to the main feed at the end of onboarding.
+      window.location.href = '/';
     }
   }
 
@@ -64,6 +68,16 @@ export default class Onboarding extends Component {
 
   render() {
     const { currentSlide } = this.state;
-    return <main className="onboarding-body">{this.slides[currentSlide]}</main>;
+    const { communityConfig } = this.props;
+    return <main className="onboarding-body" style={{backgroundImage: `url(${communityConfig.communityBackground})`}}>{this.slides[currentSlide]}</main>;
   }
 }
+
+Onboarding.propTypes = {
+  communityConfig: PropTypes.shape({
+    communityName: PropTypes.string.isRequired,
+    communityBackground: PropTypes.string.isRequired,
+    communityLogo: PropTypes.string.isRequired,
+    communityDescription: PropTypes.string.isRequired
+  }).isRequired
+};

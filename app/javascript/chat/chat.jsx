@@ -1,6 +1,14 @@
+/*
+  eslint-disable
+  consistent-return, no-unused-vars, react/destructuring-assignment,
+  react/no-access-state-in-setstate, react/button-has-type
+*/
+
 import { h, Component } from 'preact';
 import PropTypes from 'prop-types';
-import ConfigImage from '../../assets/images/three-dots.svg';
+import ConfigImage from '../../assets/images/overflow-horizontal.svg';
+import { setupPusher } from '../utilities/connect';
+import debounceAction from '../utilities/debounceAction';
 import {
   conductModeration,
   getAllMessages,
@@ -10,20 +18,33 @@ import {
   getUnopenedChannelIds,
   getContent,
   getChannelInvites,
+  getJoiningRequest,
   sendChannelInviteAction,
   deleteMessage,
   editMessage,
-} from './actions';
-import { hideMessages, scrollToBottom, setupObserver } from './util';
+} from './actions/actions';
+import {
+  sendChannelRequest,
+  rejectJoiningRequest,
+  acceptJoiningRequest,
+} from './actions/requestActions';
+import {
+  hideMessages,
+  scrollToBottom,
+  setupObserver,
+  getCurrentUser,
+  channelSorter,
+} from './util';
 import Alert from './alert';
 import Channels from './channels';
 import Compose from './compose';
 import Message from './message';
+import ActionMessage from './actionMessage';
 import Content from './content';
-import Video from './video';
+import { VideoContent } from './videoContent';
 
-import setupPusher from '../src/utils/pusher';
-import debounceAction from '../src/utils/debounceAction';
+const NARROW_WIDTH_LIMIT = 767;
+const WIDE_WIDTH_LIMIT = 1600;
 
 export default class Chat extends Component {
   static propTypes = {
@@ -37,7 +58,6 @@ export default class Chat extends Component {
     super(props);
     const chatChannels = JSON.parse(props.chatChannels);
     const chatOptions = JSON.parse(props.chatOptions);
-
     this.debouncedChannelFilter = debounceAction(
       this.triggerChannelFilter.bind(this),
     );
@@ -60,15 +80,13 @@ export default class Chat extends Component {
       currentUserId: chatOptions.currentUserId,
       notificationsPermission: null,
       activeContent: {},
-      expanded: window.innerWidth > 600,
+      fullscreenContent: null,
+      videoPath: null,
+      expanded: window.innerWidth > NARROW_WIDTH_LIMIT,
       isMobileDevice: typeof window.orientation !== 'undefined',
       subscribedPusherChannels: [],
-      activeVideoChannelId: null,
-      incomingVideoCallChannelIds: [],
-      videoCallParticipants: [],
       inviteChannels: [],
-      soundOn: true,
-      videoOn: true,
+      joiningRequests: [],
       messageOffset: 0,
       showDeleteModal: false,
       messageDeleteId: null,
@@ -77,10 +95,15 @@ export default class Chat extends Component {
       startEditing: false,
       activeEditMessage: {},
       markdownEdited: false,
+      searchShowing: false,
       channelUsers: [],
       showMemberlist: false,
       memberFilterQuery: null,
+      rerenderIfUnchangedCheck: null,
     };
+    if (chatOptions.activeChannelId) {
+      getAllMessages(chatOptions.activeChannelId, 0, this.receiveAllMessages);
+    }
   }
 
   componentDidMount() {
@@ -92,6 +115,7 @@ export default class Chat extends Component {
       isMobileDevice,
       channelPaginationNum,
       currentUserId,
+      messageOffset,
     } = this.state;
 
     this.setupChannels(chatChannels);
@@ -116,14 +140,16 @@ export default class Chat extends Component {
         channelTypeFilter === 'all'
           ? {}
           : { filters: `channel_type:${channelTypeFilter}` };
-      getChannels(
-        '',
-        activeChannelId,
-        this.props,
-        channelPaginationNum,
-        filters,
-        this.loadChannels,
-      );
+      const searchParams = {
+        query: '',
+        retrievalID: activeChannelId,
+        searchType: '',
+        paginationNumber: channelPaginationNum,
+      };
+      if (activeChannelId !== null) {
+        searchParams.searchType = 'discoverable';
+      }
+      getChannels(searchParams, filters, this.loadChannels);
       getUnopenedChannelIds(this.markUnopenedChannelIds);
     }
     if (!isMobileDevice) {
@@ -135,6 +161,15 @@ export default class Chat extends Component {
         .addEventListener('scroll', this.handleChannelScroll);
     }
     getChannelInvites(this.handleChannelInvites, null);
+    getJoiningRequest(this.handleChannelJoiningRequest, null);
+  }
+
+  shouldComponentUpdate(nextProps, nextState) {
+    if (
+      this.state.rerenderIfUnchangedCheck !== nextState.rerenderIfUnchangedCheck
+    ) {
+      return false;
+    }
   }
 
   componentDidUpdate() {
@@ -152,35 +187,11 @@ export default class Chat extends Component {
     }
   }
 
-  liveCoding = (e) => {
-    const { activeContent, activeChannelId } = this.state;
-    if (activeContent !== { type_of: 'code_editor' }) {
-      activeContent[activeChannelId] = { type_of: 'code_editor' };
-      this.setState({ activeContent });
-    }
-    if (document.querySelector('.CodeMirror')) {
-      const cm = document.querySelector('.CodeMirror').CodeMirror;
-      if (cm && e.context === 'initializing-live-code-channel') {
-        window.pusher.channel(e.channel).trigger('client-livecode', {
-          value: cm.getValue(),
-          cursorPos: cm.getCursor(),
-        });
-      } else if ((cm && e.keyPressed === true) || e.value.length > 0) {
-        const cursorCoords = e.cursorPos;
-        const cursorElement = document.createElement('span');
-        cursorElement.classList.add('cursorelement');
-        cursorElement.style.height = `${
-          cursorCoords.bottom - cursorCoords.top
-        }px`;
-        cm.setValue(e.value);
-        cm.setBookmark(e.cursorPos, { widget: cursorElement });
-      }
-    }
-  };
-
-  filterForActiveChannel = (channels, id) =>
+  filterForActiveChannel = (channels, id, currentUserId) =>
     channels.filter(
-      (channel) => channel.chat_channel_id === parseInt(id, 10),
+      (channel) =>
+        channel.chat_channel_id === parseInt(id, 10) &&
+        channel.viewable_by === parseInt(currentUserId, 10),
     )[0];
 
   subscribePusher = (channelName) => {
@@ -195,9 +206,6 @@ export default class Chat extends Component {
         channelCleared: this.clearChannel,
         redactUserMessages: this.redactUserMessages,
         channelError: this.channelError,
-        liveCoding: this.liveCoding,
-        videoCallInitiated: this.receiveVideoCall,
-        videoCallEnded: this.receiveVideoCallHangup,
         mentioned: this.mentioned,
         messageOpened: this.messageOpened,
       });
@@ -212,7 +220,12 @@ export default class Chat extends Component {
   messageOpened = () => {};
 
   loadChannels = (channels, query) => {
-    const { activeChannelId, activeChannel } = this.state;
+    const { activeChannelId } = this.state;
+    const activeChannel =
+      this.state.activeChannel ||
+      channels.filter(
+        (channel) => channel.chat_channel_id === activeChannelId,
+      )[0];
     if (activeChannelId && query.length === 0) {
       this.setState({
         chatChannels: channels,
@@ -245,10 +258,11 @@ export default class Chat extends Component {
         filterQuery: query || '',
         scrolled: false,
       });
-      const channel = channels[0];
+
       this.triggerSwitchChannel(
-        channel.chat_channel_id,
-        channel.channel_modified_slug,
+        channels[0].chat_channel_id,
+        channels[0].channel_modified_slug,
+        channels,
       );
     } else {
       this.setState({ channelsLoaded: true });
@@ -261,7 +275,13 @@ export default class Chat extends Component {
       channels.filter(this.channelTypeFilterFn('invite_only')),
       (channel) => `presence-channel-${channel.chat_channel_id}`,
     );
-    document.getElementById('chatchannels__channelslist').scrollTop = 0;
+    const chatChannelsList = document.getElementById(
+      'chatchannels__channelslist',
+    );
+
+    if (chatChannelsList) {
+      chatChannelsList.scrollTop = 0;
+    }
   };
 
   markUnopenedChannelIds = (ids) => {
@@ -287,7 +307,7 @@ export default class Chat extends Component {
   };
 
   loadPaginatedChannels = (channels) => {
-    const { state } = this.state;
+    const { state } = this;
     const currentChannels = state.chatChannels;
     const currentChannelIds = currentChannels.map((channel) => channel.id);
     const newChannels = currentChannels;
@@ -363,10 +383,13 @@ export default class Chat extends Component {
 
   observerCallback = (entries) => {
     entries.forEach((entry) => {
-      if (entry.isIntersecting) {
+      if (entry.isIntersecting && this.state.scrolled === true) {
         this.setState({ scrolled: false, showAlert: false });
-      } else {
-        this.setState({ scrolled: true });
+      } else if (this.state.scrolled === false) {
+        this.setState({
+          scrolled: true,
+          rerenderIfUnchangedCheck: Math.random(),
+        });
       }
     });
   };
@@ -421,6 +444,13 @@ export default class Chat extends Component {
       unopenedChannelIds,
     } = this.state;
     const receivedChatChannelId = message.chat_channel_id;
+    const messageList = document.getElementById('messagelist');
+    const nearBottom =
+      messageList.scrollTop + messageList.offsetHeight + 400 >
+      messageList.scrollHeight;
+    if (nearBottom) {
+      scrollToBottom();
+    }
     let newMessages = [];
     if (
       message.temp_id &&
@@ -439,7 +469,9 @@ export default class Chat extends Component {
       }
     }
     const newShowAlert =
-      activeChannelId === receivedChatChannelId ? { showAlert: scrolled } : {};
+      activeChannelId === receivedChatChannelId
+        ? { showAlert: !nearBottom }
+        : {};
     let newMessageChannelIndex = 0;
     let newMessageChannel = null;
     const newChannelsObj = chatChannels.map((channel, index) => {
@@ -478,19 +510,6 @@ export default class Chat extends Component {
     }));
   };
 
-  receiveVideoCall = (callObj) => {
-    this.setState((prevState) => ({
-      incomingVideoCallChannelIds: [...prevState, callObj.channelId],
-    }));
-  };
-
-  receiveVideoCallHangup = () => {
-    const { videoCallParticipants } = this.state;
-    if (videoCallParticipants.size < 1) {
-      this.setState({ activeVideoChannelId: null });
-    }
-  };
-
   redactUserMessages = (res) => {
     const { messages } = this.state;
     const newMessages = hideMessages(messages, res.userId);
@@ -524,14 +543,13 @@ export default class Chat extends Component {
         channelTypeFilter === 'all'
           ? {}
           : { filters: `channel_type:${channelTypeFilter}` };
-      getChannels(
-        filterQuery,
-        activeChannelId,
-        this.props,
-        channelPaginationNum,
-        filters,
-        this.loadPaginatedChannels,
-      );
+      const searchParams = {
+        query: filterQuery,
+        retrievalID: activeChannelId,
+        searchType: '',
+        paginationNumber: channelPaginationNum,
+      };
+      getChannels(searchParams, filters, this.loadPaginatedChannels);
     }
   };
 
@@ -539,12 +557,27 @@ export default class Chat extends Component {
     this.setState({ inviteChannels: response });
   };
 
+  handleChannelJoiningRequest = (res) => {
+    this.setState({ joiningRequests: res });
+  };
+
   handleKeyDown = (e) => {
-    const { showMemberlist } = this.state;
+    const {
+      showMemberlist,
+      activeContent,
+      activeChannelId,
+      messages,
+      currentUserId,
+    } = this.state;
     const enterPressed = e.keyCode === 13;
+    const leftPressed = e.keyCode === 37;
+    const rightPressed = e.keyCode === 39;
+    const escPressed = e.keyCode === 27;
     const targetValue = e.target.value;
     const messageIsEmpty = targetValue.length === 0;
     const shiftPressed = e.shiftKey;
+    const upArrowPressed = e.keyCode === 38;
+    const deletePressed = e.keyCode === 46;
 
     if (enterPressed) {
       if (showMemberlist) {
@@ -562,6 +595,61 @@ export default class Chat extends Component {
     if (e.target.value.includes('@')) {
       if (e.keyCode === 40 || e.keyCode === 38) {
         e.preventDefault();
+      }
+    }
+    if (
+      leftPressed &&
+      activeContent[activeChannelId] &&
+      e.target.value === '' &&
+      document.getElementById('activecontent-iframe')
+    ) {
+      e.preventDefault();
+      try {
+        e.target.value = document.getElementById(
+          'activecontent-iframe',
+        ).contentWindow.location.href;
+      } catch (err) {
+        e.target.value = activeContent[activeChannelId].path;
+      }
+    }
+    if (
+      rightPressed &&
+      !activeContent[activeChannelId] &&
+      e.target.value === ''
+    ) {
+      e.preventDefault();
+      const richLinks = document.querySelectorAll('.chatchannels__richlink');
+      if (richLinks.length === 0) {
+        return;
+      }
+      this.setActiveContentState(activeChannelId, {
+        type_of: 'loading-post',
+      });
+      this.setActiveContent({
+        path: richLinks[richLinks.length - 1].href,
+        type_of: 'article',
+      });
+    }
+    if (escPressed && activeContent[activeChannelId]) {
+      this.setActiveContentState(activeChannelId, null);
+      this.setState({
+        fullscreenContent: null,
+        expanded: window.innerWidth > NARROW_WIDTH_LIMIT,
+      });
+    }
+    if (messageIsEmpty) {
+      const messagesByCurrentUser = messages[activeChannelId].filter(
+        (message) => message.user_id === currentUserId,
+      );
+      const lastMessage =
+        messagesByCurrentUser[messagesByCurrentUser.length - 1];
+
+      if (lastMessage) {
+        if (upArrowPressed) {
+          this.triggerEditMessage(lastMessage.id);
+        } else if (deletePressed) {
+          this.triggerDeleteMessage(lastMessage.id);
+        }
       }
     }
   };
@@ -596,6 +684,7 @@ export default class Chat extends Component {
 
   handleMessageSubmit = (message) => {
     const { activeChannelId } = this.state;
+    scrollToBottom();
     // should check if user has the privilege
     if (message.startsWith('/code')) {
       this.setActiveContentState(activeChannelId, { type_of: 'code_editor' });
@@ -605,10 +694,14 @@ export default class Chat extends Component {
         message: '/call',
         mentionedUsersId: this.getMentionedUsers(message),
       };
-      this.setActiveContent({
-        path: `/video_chats/${activeChannelId}`,
-        type_of: 'article',
-      });
+      this.setState({ videoPath: `/video_chats/${activeChannelId}` });
+      sendMessage(messageObject, this.handleSuccess, this.handleFailure);
+    } else if (message.startsWith('/play ')) {
+      const messageObject = {
+        activeChannelId,
+        message,
+        mentionedUsersId: this.getMentionedUsers(message),
+      };
       sendMessage(messageObject, this.handleSuccess, this.handleFailure);
     } else if (message.startsWith('/new')) {
       this.setActiveContentState(activeChannelId, {
@@ -616,6 +709,30 @@ export default class Chat extends Component {
       });
       this.setActiveContent({
         path: '/new',
+        type_of: 'article',
+      });
+    } else if (message.startsWith('/search')) {
+      this.setActiveContentState(activeChannelId, {
+        type_of: 'loading-post',
+      });
+      this.setActiveContent({
+        path: `/search?q=${message.replace('/search ', '')}`,
+        type_of: 'article',
+      });
+    } else if (message.startsWith('/s ')) {
+      this.setActiveContentState(activeChannelId, {
+        type_of: 'loading-post',
+      });
+      this.setActiveContent({
+        path: `/search?q=${message.replace('/s ', '')}`,
+        type_of: 'article',
+      });
+    } else if (message.startsWith('/')) {
+      this.setActiveContentState(activeChannelId, {
+        type_of: 'loading-post',
+      });
+      this.setActiveContent({
+        path: message,
         type_of: 'article',
       });
     } else if (message.startsWith('/github')) {
@@ -634,6 +751,7 @@ export default class Chat extends Component {
         message,
         mentionedUsersId: this.getMentionedUsers(message),
       };
+      this.setState({ scrolled: false, showAlert: false });
       sendMessage(messageObject, this.handleSuccess, this.handleFailure);
     }
   };
@@ -641,6 +759,10 @@ export default class Chat extends Component {
   handleSwitchChannel = (e) => {
     e.preventDefault();
     let { target } = e;
+
+    const chatContainer = document.querySelector('.chat__activechat');
+    chatContainer.classList.remove('chat__activechat--hidden');
+
     if (!target.dataset.channelId) {
       target = target.parentElement;
     }
@@ -650,53 +772,30 @@ export default class Chat extends Component {
     );
   };
 
-  answerVideoCall = () => {
-    const { activeChannelId } = this.state;
-    this.setState({
-      activeVideoChannelId: activeChannelId,
-      incomingVideoCallChannelIds: [],
-    });
-  };
-
-  hangupVideoCall = () => {
-    const { activeVideoChannelId } = this.state;
-    window.pusher
-      .channel(`presence-channel-${activeVideoChannelId}`)
-      .trigger('client-endvideocall', {});
-    this.setState({
-      activeVideoChannelId: null,
-    });
-  };
-
-  handleVideoParticipantChange = (participants) => {
-    this.setState({ videoCallParticipants: participants });
-  };
-
-  toggleVideoSound = () => {
-    this.setState((prevState) => ({ soundOn: !prevState.soundOn }));
-  };
-
-  toggleVideoVideo = () => {
-    this.setState((prevState) => ({ videoOn: !prevState.videoOn }));
-  };
-
-  triggerSwitchChannel = (id, slug) => {
+  triggerSwitchChannel = (id, slug, channels) => {
     const {
       chatChannels,
       isMobileDevice,
       unopenedChannelIds,
       activeChannelId,
+      currentUserId,
     } = this.state;
+    const channelList = channels || chatChannels;
     const newUnopenedChannelIds = unopenedChannelIds;
     const index = newUnopenedChannelIds.indexOf(id);
     if (index > -1) {
       newUnopenedChannelIds.splice(index, 1);
     }
     this.setState({
-      activeChannel: this.filterForActiveChannel(chatChannels, id),
+      activeChannel: this.filterForActiveChannel(
+        channelList,
+        id,
+        currentUserId,
+      ),
       activeChannelId: parseInt(id, 10),
       scrolled: false,
       showAlert: false,
+      allMessagesLoaded: false,
       unopenedChannelIds: unopenedChannelIds.filter(
         (unopenedId) => unopenedId !== id,
       ),
@@ -741,16 +840,16 @@ export default class Chat extends Component {
     }
   };
 
-  triggerDeleteMessage = (e) => {
-    this.setState({ messageDeleteId: e.target.dataset.content });
+  triggerDeleteMessage = (messageId) => {
+    this.setState({ messageDeleteId: messageId });
     this.setState({ showDeleteModal: true });
   };
 
-  triggerEditMessage = (e) => {
+  triggerEditMessage = (messageId) => {
     const { messages, activeChannelId } = this.state;
     this.setState({
       activeEditMessage: messages[activeChannelId].filter(
-        (message) => message.id === parseInt(e.target.dataset.content, 10),
+        (message) => message.id === messageId,
       )[0],
     });
     this.setState({ startEditing: true });
@@ -758,6 +857,7 @@ export default class Chat extends Component {
 
   handleSuccess = (response) => {
     const { activeChannelId } = this.state;
+    scrollToBottom();
     if (response.status === 'success') {
       if (response.message.temp_id) {
         this.setState(({ messages }) => {
@@ -774,6 +874,24 @@ export default class Chat extends Component {
     } else if (response.status === 'error') {
       this.receiveNewMessage(response.message);
     }
+  };
+
+  handleRequestRejection = (e) => {
+    rejectJoiningRequest(
+      e.target.dataset.channelId,
+      e.target.dataset.membershipId,
+      this.handleJoiningManagerSuccess(e.target.dataset.membershipId),
+      null,
+    );
+  };
+
+  handleRequestApproval = (e) => {
+    acceptJoiningRequest(
+      e.target.dataset.channelId,
+      e.target.dataset.membershipId,
+      this.handleJoiningManagerSuccess(e.target.dataset.membershipId),
+      null,
+    );
   };
 
   triggerActiveContent = (e) => {
@@ -794,16 +912,33 @@ export default class Chat extends Component {
       e.stopPropagation();
 
       const { activeChannelId, activeChannel } = this.state;
-      if (target.dataset.content.startsWith('chat_channels/')) {
+
+      if (content.startsWith('chat_channels/')) {
         this.setActiveContentState(activeChannelId, {
           type_of: 'loading-user',
         });
-        getContent(
-          `/${target.dataset.content}/channel_info`,
-          this.setActiveContent,
-          null,
-        );
-      } else if (target.dataset.content === 'sidecar_all') {
+        getContent(`/${content}/channel_info`, this.setActiveContent, null);
+      } else if (content === 'sidecar-channel-request') {
+        this.setActiveContent({
+          data: {
+            user: getCurrentUser(),
+            channel: {
+              id: target.dataset.channelId,
+              name: target.dataset.channelName,
+              status: target.dataset.channelStatus,
+            },
+          },
+          handleJoiningRequest: this.handleJoiningRequest,
+          type_of: 'channel-request',
+        });
+      } else if (content === 'sidecar-joining-request-manager') {
+        this.setActiveContent({
+          data: this.state.joiningRequests,
+          type_of: 'channel-request-manager',
+          handleRequestRejection: this.handleRequestRejection,
+          handleRequestApproval: this.handleRequestApproval,
+        });
+      } else if (content === 'sidecar_all') {
         this.setActiveContentState(activeChannelId, {
           type_of: 'loading-post',
         });
@@ -811,6 +946,17 @@ export default class Chat extends Component {
           path: `/chat_channel_memberships/${activeChannel.id}/edit`,
           type_of: 'article',
         });
+      } else if (content.startsWith('sidecar-content-plus-video')) {
+        this.setActiveContentState(activeChannelId, {
+          type_of: 'loading-post',
+        });
+        this.setActiveContent({
+          path: target.href || target.parentElement.href,
+          type_of: 'article',
+        });
+        this.setState({ videoPath: `/video_chats/${activeChannelId}` });
+      } else if (content.startsWith('sidecar-video')) {
+        this.setState({ videoPath: target.href || target.parentElement.href });
       } else if (
         content.startsWith('sidecar') ||
         content.startsWith('article')
@@ -825,6 +971,23 @@ export default class Chat extends Component {
         });
       } else if (target.dataset.content === 'exit') {
         this.setActiveContentState(activeChannelId, null);
+        this.setState({
+          fullscreenContent: null,
+          expanded: window.innerWidth > NARROW_WIDTH_LIMIT,
+        });
+      } else if (target.dataset.content === 'fullscreen') {
+        const mode =
+          this.state.fullscreenContent === 'sidecar' ? null : 'sidecar';
+        this.setState({
+          fullscreenContent: mode,
+          expanded: mode === null || window.innerWidth > WIDE_WIDTH_LIMIT,
+        });
+      } else if (target.dataset.content === 'chat_channel_setting') {
+        this.setActiveContent({
+          data: {},
+          type_of: 'chat-channel-setting',
+          activeMembershipId: activeChannel.id,
+        });
       }
     }
     return false;
@@ -891,7 +1054,18 @@ export default class Chat extends Component {
       fetchingPaginatedChannels: false,
     });
     const filters = type === 'all' ? {} : { filters: `channel_type:${type}` };
-    getChannels(filterQuery, null, this.props, 0, filters, this.loadChannels);
+    const searchParams = {
+      query: filterQuery,
+      retrievalID: null,
+      searchType: '',
+      paginationNumber: 0,
+    };
+    if (filterQuery && type !== 'direct') {
+      searchParams.searchType = 'discoverable';
+      getChannels(searchParams, filters, this.loadChannels);
+    } else {
+      getChannels(searchParams, filters, this.loadChannels);
+    }
   };
 
   handleFailure = (err) => {
@@ -915,22 +1089,15 @@ export default class Chat extends Component {
         return (
           <div className="chatmessage" style={{ color: 'grey' }}>
             <div className="chatmessage__body">
-              You and
-              {' '}
+              You and{' '}
               <a href={`/${activeChannel.channel_modified_slug}`}>
                 {activeChannel.channel_modified_slug}
-              </a>
-              {' '}
-              are connected because you both follow each other. All interactions
-              {' '}
+              </a>{' '}
+              are connected because you both follow each other. All interactions{' '}
               <em>
                 <b>must</b>
-              </em>
-              {' '}
-              abide by the 
-              {' '}
-              <a href="/code-of-conduct">code of conduct</a>
-              .
+              </em>{' '}
+              abide by the <a href="/code-of-conduct">code of conduct</a>.
             </div>
           </div>
         );
@@ -939,41 +1106,44 @@ export default class Chat extends Component {
         return (
           <div className="chatmessage" style={{ color: 'grey' }}>
             <div className="chatmessage__body">
-              You have joined 
-              {' '}
-              {activeChannel.channel_name}
-              ! All interactions
-              {' '}
+              You have joined {activeChannel.channel_name}! All interactions{' '}
               <em>
                 <b>must</b>
-              </em>
-              {' '}
-              abide by the 
-              {' '}
-              <a href="/code-of-conduct">code of conduct</a>
-              .
+              </em>{' '}
+              abide by the <a href="/code-of-conduct">code of conduct</a>.
             </div>
           </div>
         );
       }
     }
-    return messages[activeChannelId].map((message) => (
-      <Message
-        currentUserId={currentUserId}
-        id={message.id}
-        user={message.username}
-        userID={message.user_id}
-        profileImageUrl={message.profile_image_url}
-        message={message.message}
-        timestamp={showTimestamp ? message.timestamp : null}
-        editedAt={message.edited_at}
-        color={message.color}
-        type={message.type}
-        onContentTrigger={this.triggerActiveContent}
-        onDeleteMessageTrigger={this.triggerDeleteMessage}
-        onEditMessageTrigger={this.triggerEditMessage}
-      />
-    ));
+
+    return messages[activeChannelId].map((message) =>
+      message.action ? (
+        <ActionMessage
+          user={message.username}
+          profileImageUrl={message.profile_image_url}
+          message={message.message}
+          timestamp={showTimestamp ? message.timestamp : null}
+          color={message.color}
+          onContentTrigger={this.triggerActiveContent}
+        />
+      ) : (
+        <Message
+          currentUserId={currentUserId}
+          id={message.id}
+          user={message.username}
+          userID={message.user_id}
+          profileImageUrl={message.profile_image_url}
+          message={message.message}
+          timestamp={showTimestamp ? message.timestamp : null}
+          editedAt={message.edited_at}
+          color={message.color}
+          onContentTrigger={this.triggerActiveContent}
+          onDeleteMessageTrigger={this.triggerDeleteMessage}
+          onEditMessageTrigger={this.triggerEditMessage}
+        />
+      ),
+    );
   };
 
   triggerChannelFilter = (e) => {
@@ -982,14 +1152,18 @@ export default class Chat extends Component {
       channelTypeFilter === 'all'
         ? {}
         : { filters: `channel_type:${channelTypeFilter}` };
-    getChannels(
-      e.target.value,
-      null,
-      this.props,
-      0,
-      filters,
-      this.loadChannels,
-    );
+    const searchParams = {
+      query: e.target.value,
+      retrievalID: null,
+      searchType: '',
+      paginationNumber: 0,
+    };
+    if (e.target.value) {
+      searchParams.searchType = 'discoverable';
+      getChannels(searchParams, filters, this.loadChannels);
+    } else {
+      getChannels(searchParams, filters, this.loadChannels);
+    }
   };
 
   toggleExpand = () => {
@@ -1000,14 +1174,32 @@ export default class Chat extends Component {
     <button
       data-channel-type={type}
       onClick={this.triggerChannelTypeFilter}
-      className={`chat__channeltypefilterbutton chat__channeltypefilterbutton--${
-        type === active ? 'active' : 'inactive'
+      className={`chat__channeltypefilterbutton crayons-indicator crayons-indicator--${
+        type === active ? 'accent' : ''
       }`}
       type="button"
     >
       {name}
     </button>
   );
+
+  toggleSearchShowing = () => {
+    if (!this.state.searchShowing) {
+      setTimeout(() => {
+        document.getElementById('chatchannelsearchbar').focus();
+      }, 100);
+    } else {
+      const searchParams = {
+        query: '',
+        retrievalID: null,
+        searchType: '',
+        paginationNumber: 0,
+      };
+      getChannels(searchParams, this.loadChannels);
+      this.setState({ filterQuery: '' });
+    }
+    this.setState({ searchShowing: !this.state.searchShowing });
+  };
 
   renderChatChannels = () => {
     const { state } = this;
@@ -1016,6 +1208,7 @@ export default class Chat extends Component {
       const notificationsButton = '';
       let notificationsState = '';
       let invitesButton = '';
+      let joiningRequestButton = '';
       if (notificationsPermission === 'granted') {
         notificationsState = (
           <div className="chat_chatconfig chat_chatconfig--on">
@@ -1040,81 +1233,99 @@ export default class Chat extends Component {
             >
               <span role="img" aria-label="emoji">
                 👋
-              </span>
-              {' '}
+              </span>{' '}
               New Invitations!
             </a>
           </div>
         );
       }
-      if (state.expanded) {
-        return (
-          <div className="chat__channels chat__channels--expanded">
-            {notificationsButton}
+      if (state.joiningRequests.length > 0) {
+        joiningRequestButton = (
+          <div className="chat__channelinvitationsindicator">
             <button
-              className="chat__channelstogglebutt"
-              onClick={this.toggleExpand}
+              onClick={this.triggerActiveContent}
+              data-content="sidecar-joining-request-manager"
               type="button"
             >
-              {'<'}
+              <span role="img" aria-label="emoji">
+                👋
+              </span>{' '}
+              New Requests
             </button>
-            <input placeholder="Filter" onKeyUp={this.debouncedChannelFilter} />
-            {invitesButton}
-            <div className="chat__channeltypefilter">
-              {this.renderChannelFilterButton(
-                'all',
-                'all',
-                state.channelTypeFilter,
-              )}
-              {this.renderChannelFilterButton(
-                'direct',
-                'direct',
-                state.channelTypeFilter,
-              )}
-              {this.renderChannelFilterButton(
-                'invite_only',
-                'group',
-                state.channelTypeFilter,
-              )}
-            </div>
-            <Channels
-              activeChannelId={state.activeChannelId}
-              chatChannels={state.chatChannels}
-              unopenedChannelIds={state.unopenedChannelIds}
-              handleSwitchChannel={this.handleSwitchChannel}
-              channelsLoaded={state.channelsLoaded}
-              filterQuery={state.filterQuery}
-              expanded={state.expanded}
-              incomingVideoCallChannelIds={state.incomingVideoCallChannelIds}
-            />
-            {notificationsState}
           </div>
         );
       }
       return (
         <div className="chat__channels">
           {notificationsButton}
-          <button
-            className="chat__channelstogglebutt"
-            onClick={this.toggleExpand}
-            style={{ width: '100%' }}
-            type="button"
-          >
-            {'>'}
-          </button>
+          {state.searchShowing ? (
+            <input
+              placeholder="Search Channels"
+              onKeyUp={this.debouncedChannelFilter}
+              id="chatchannelsearchbar"
+              className="crayons-textfield"
+              aria-label="Search Channels"
+            />
+          ) : (
+            ''
+          )}
+          {invitesButton}
+          {joiningRequestButton}
+          <div className="chat__channeltypefilter">
+            <button
+              className="chat__channelssearchtoggle"
+              onClick={this.toggleSearchShowing}
+              aria-label="Toggle channel search"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                width="17"
+                height="17"
+              >
+                <path fill="none" d="M0 0h24v24H0z" />
+                <path d="M18.031 16.617l4.283 4.282-1.415 1.415-4.282-4.283A8.96 8.96 0 0 1 11 20c-4.968 0-9-4.032-9-9s4.032-9 9-9 9 4.032 9 9a8.96 8.96 0 0 1-1.969 5.617zm-2.006-.742A6.977 6.977 0 0 0 18 11c0-3.868-3.133-7-7-7-3.868 0-7 3.132-7 7 0 3.867 3.132 7 7 7a6.977 6.977 0 0 0 4.875-1.975l.15-.15z" />
+              </svg>
+            </button>
+            {this.renderChannelFilterButton(
+              'all',
+              'all',
+              state.channelTypeFilter,
+            )}
+            {this.renderChannelFilterButton(
+              'direct',
+              'direct',
+              state.channelTypeFilter,
+            )}
+            {this.renderChannelFilterButton(
+              'invite_only',
+              'group',
+              state.channelTypeFilter,
+            )}
+          </div>
           <Channels
-            incomingVideoCallChannelIds={state.incomingVideoCallChannelIds}
             activeChannelId={state.activeChannelId}
             chatChannels={state.chatChannels}
             unopenedChannelIds={state.unopenedChannelIds}
             handleSwitchChannel={this.handleSwitchChannel}
+            channelsLoaded={state.channelsLoaded}
+            filterQuery={state.filterQuery}
             expanded={state.expanded}
+            aria-expanded={state.expanded}
+            currentUserId={state.currentUserId}
+            triggerActiveContent={this.triggerActiveContent}
           />
           {notificationsState}
         </div>
       );
     }
     return '';
+  };
+
+  navigateToChannelsList = () => {
+    const chatContainer = document.querySelector('.chat__activechat');
+
+    chatContainer.classList.add('chat__activechat--hidden');
   };
 
   handleMessageScroll = () => {
@@ -1136,9 +1347,9 @@ export default class Chat extends Component {
         (this.scroller.scrollTop + this.scroller.clientHeight) /
         this.scroller.scrollHeight;
 
-      if (scrolledRatio < 0.7) {
+      if (scrolledRatio < 0.5) {
         jumpbackButton.classList.remove('chatchanneljumpback__hide');
-      } else if (scrolledRatio > 0.8) {
+      } else if (scrolledRatio > 0.6) {
         jumpbackButton.classList.add('chatchanneljumpback__hide');
       }
 
@@ -1175,7 +1386,7 @@ export default class Chat extends Component {
       .classList.remove('chatchanneljumpback__hide');
   };
 
-  renderActiveChatChannel = (channelHeader, incomingCall) => {
+  renderActiveChatChannel = (channelHeader) => {
     const { state, props } = this;
 
     return (
@@ -1191,7 +1402,6 @@ export default class Chat extends Component {
             id="messagelist"
           >
             {this.renderMessages()}
-            {incomingCall}
             <div className="messagelist__sentinel" id="messagelist__sentinel" />
           </div>
           <div
@@ -1226,7 +1436,6 @@ export default class Chat extends Component {
               activeChannelId={state.activeChannelId}
               startEditing={state.startEditing}
               markdownEdited={state.markdownEdited}
-              editMessageHtml={state.activeEditMessage.message}
               editMessageMarkdown={state.activeEditMessage.markdown}
               handleEditMessageClose={this.handleEditMessageClose}
             />
@@ -1235,13 +1444,33 @@ export default class Chat extends Component {
         <Content
           onTriggerContent={this.triggerActiveContent}
           resource={state.activeContent[state.activeChannelId]}
-          activeChannelId={state.activeChannelId}
           activeChannel={state.activeChannel}
-          pusherKey={props.pusherKey}
-          githubToken={props.githubToken}
+          fullscreen={state.fullscreenContent === 'sidecar'}
+        />
+        <VideoContent
+          videoPath={state.videoPath}
+          onTriggerVideoContent={this.onTriggerVideoContent}
+          fullscreen={state.fullscreenContent === 'video'}
         />
       </div>
     );
+  };
+
+  onTriggerVideoContent = (e) => {
+    if (e.target.dataset.content === 'exit') {
+      this.setState({
+        videoPath: null,
+        fullscreenContent: null,
+        expanded: window.innerWidth > 600,
+      });
+    } else if (this.state.fullscreenContent === 'video') {
+      this.setState({ fullscreenContent: null });
+    } else {
+      this.setState({
+        fullscreenContent: 'video',
+        expanded: window.innerWidth > WIDE_WIDTH_LIMIT,
+      });
+    }
   };
 
   handleMention = (e) => {
@@ -1370,6 +1599,7 @@ export default class Chat extends Component {
               .filter((user) => user.username.match(filterRegx))
               .map((user) => (
                 <div
+                  key={user.username}
                   className="mention__user"
                   role="button"
                   onClick={this.addUserName}
@@ -1419,40 +1649,44 @@ export default class Chat extends Component {
         id="message"
         className={
           showDeleteModal
-            ? 'message__delete__modal'
-            : 'message__delete__modal message__delete__modal__hide'
+            ? 'message__delete__modal crayons-modal crayons-modal--s absolute'
+            : 'message__delete__modal message__delete__modal__hide crayons-modal crayons-modal--s absolute'
         }
+        aria-hidden={showDeleteModal}
+        role="dialog"
       >
-        <div className="modal__content">
-          <h3> Are you sure, you want to delete this message ?</h3>
-
-          <div className="delete__action__buttons">
-            <div
-              role="button"
-              className="message__cancel__button"
-              onClick={this.handleCloseDeleteModal}
-              tabIndex="0"
-              onKeyUp={(e) => {
-                if (e.keyCode === 13) this.handleCloseDeleteModal();
-              }}
-            >
-              {' '}
-              Cancel
-            </div>
-            <div
-              role="button"
-              className="message__delete__button"
-              onClick={this.handleMessageDelete}
-              tabIndex="0"
-              onKeyUp={(e) => {
-                if (e.keyCode === 13) this.handleMessageDelete();
-              }}
-            >
-              {' '}
-              Delete
+        <div className="crayons-modal__box">
+          <div className="crayons-modal__box__body">
+            <h3>Are you sure, you want to delete this message ?</h3>
+            <div className="delete-actions__container">
+              <div
+                role="button"
+                className="crayons-btn crayons-btn--danger message__delete__button"
+                onClick={this.handleMessageDelete}
+                tabIndex="0"
+                onKeyUp={(e) => {
+                  if (e.keyCode === 13) this.handleMessageDelete();
+                }}
+              >
+                {' '}
+                Delete
+              </div>
+              <div
+                role="button"
+                className="crayons-btn crayons-btn--secondary message__cancel__button"
+                onClick={this.handleCloseDeleteModal}
+                tabIndex="0"
+                onKeyUp={(e) => {
+                  if (e.keyCode === 13) this.handleCloseDeleteModal();
+                }}
+              >
+                {' '}
+                Cancel
+              </div>
             </div>
           </div>
         </div>
+        <div className="crayons-modal__overlay" />
       </div>
     );
   };
@@ -1467,12 +1701,62 @@ export default class Chat extends Component {
     this.setState({ showDeleteModal: false });
   };
 
+  handleJoiningRequest = (e) => {
+    sendChannelRequest(
+      e.target.dataset.channelId,
+      this.handleJoiningRequestSuccess,
+      null,
+    );
+  };
+
+  handleJoiningManagerSuccess = (membershipId) => {
+    const { activeChannelId } = this.state;
+    this.setState({
+      joiningRequests: this.state.joiningRequests.filter(
+        (req) => req.membership_id !== parseInt(membershipId, 10),
+      ),
+    });
+    this.setActiveContentState(activeChannelId, null);
+    this.setState({ fullscreenContent: null });
+  };
+
+  handleJoiningRequestSuccess = () => {
+    const { activeChannelId } = this.state;
+    this.setActiveContentState(activeChannelId, null);
+    this.setState({ fullscreenContent: null });
+    this.toggleSearchShowing();
+  };
+
+  renderChannelBackNav = () => {
+    return (
+      <button
+        className="crayons-btn crayons-btn--icon-rounded crayons-btn--ghost active-channel__back-btn"
+        onClick={this.navigateToChannelsList}
+        onKeyUp={(e) => {
+          if (e.keyCode === 13) this.navigateToChannelsList(e);
+        }}
+        tabIndex="0"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          width="24"
+          height="24"
+          className="crayons-icon"
+        >
+          <path d="M10.828 12l4.95 4.95-1.414 1.414L8 12l6.364-6.364 1.414 1.414z" />
+        </svg>
+      </button>
+    );
+  };
+
   renderChannelHeaderInner = () => {
     const { activeChannel } = this.state;
     if (activeChannel.channel_type === 'direct') {
       return (
         <a
           href={`/${activeChannel.channel_username}`}
+          className="active-channel__title"
           onClick={this.triggerActiveContent}
           data-content="sidecar-user"
         >
@@ -1482,9 +1766,9 @@ export default class Chat extends Component {
     }
     return (
       <a
-        href={`/chat_channel_memberships/${activeChannel.id}/edit`}
+        href="#/"
         onClick={this.triggerActiveContent}
-        data-content="sidecar-chat_channel_membership"
+        data-content="chat_channel_setting"
       >
         {activeChannel.channel_name}
       </a>
@@ -1500,19 +1784,19 @@ export default class Chat extends Component {
       return '';
     }
 
-    const dataContent =
-      activeChannel.channel_type === 'direct'
-        ? 'sidecar-user'
-        : `sidecar-chat_channel_membership`;
-
     const path =
       activeChannel.channel_type === 'direct'
         ? `/${activeChannel.channel_username}`
-        : `/chat_channel_memberships/${activeChannel.id}/edit`;
+        : `#`;
+
+    const dataContent =
+      activeChannel.channel_type === 'direct'
+        ? 'sidecar-user'
+        : `chat_channel_setting`;
 
     return (
       <a
-        className="activechatchannel__channelconfig"
+        className="crayons-btn crayons-btn--icon-rounded crayons-btn--ghost"
         onClick={this.triggerActiveContent}
         onKeyUp={(e) => {
           if (e.keyCode === 13) this.triggerActiveContent(e);
@@ -1521,11 +1805,15 @@ export default class Chat extends Component {
         href={path}
         data-content={dataContent}
       >
-        <img
-          src={ConfigImage}
-          alt="channel config"
-          data-content={dataContent}
-        />
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          width="24"
+          height="24"
+          className="crayons-icon"
+        >
+          <path d="M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10zm0-2a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM11 7h2v2h-2V7zm0 4h2v6h-2v-6z" />
+        </svg>
       </a>
     );
   };
@@ -1537,62 +1825,39 @@ export default class Chat extends Component {
       !navigator.userAgent.match('CriOS')
         ? ' chat--iossafari'
         : '';
-    let channelHeader = <div className="activechatchannel__header">&nbsp;</div>;
+    let channelHeader = <div className="active-channel__header">&nbsp;</div>;
     if (state.activeChannel) {
       channelHeader = (
-        <div className="activechatchannel__header">
+        <div className="active-channel__header">
+          {this.renderChannelBackNav()}
           {this.renderChannelHeaderInner()}
           {this.renderChannelConfigImage()}
         </div>
       );
     }
-    let vid = '';
-    let incomingCall = '';
-    if (state.activeVideoChannelId) {
-      vid = (
-        <Video
-          activeChannelId={state.activeChannelId}
-          onToggleSound={this.toggleVideoSound}
-          onToggleVideo={this.toggleVideoVideo}
-          soundOn={state.soundOn}
-          videoOn={state.videoOn}
-          onExit={this.hangupVideoCall}
-          onParticipantChange={this.handleVideoParticipantChange}
-        />
-      );
-    } else if (
-      state.incomingVideoCallChannelIds.includes(state.activeChannelId)
-    ) {
-      incomingCall = (
-        <div
-          className="activechatchannel__incomingcall"
-          onClick={this.answerVideoCall}
-          onKeyUp={(e) => {
-            if (e.keyCode === 13) this.answerVideoCall();
-          }}
-          role="button"
-          tabIndex="0"
-        >
-          <span role="img" aria-label="waving">
-            👋
-          </span>
-          {' '}
-          Incoming Video Call
-          {' '}
-        </div>
-      );
+    let fullscreenMode = '';
+    if (state.fullscreenContent === 'sidecar') {
+      fullscreenMode = 'chat--content-visible-full';
+    } else if (state.fullscreenContent === 'video') {
+      fullscreenMode = 'chat--video-visible-full';
     }
     return (
       <div
-        className={`chat chat--${
-          state.expanded ? 'expanded' : 'contracted'
-        }${detectIOSSafariClass}`}
+        data-testid="chat"
+        className={`chat chat--expanded
+        ${detectIOSSafariClass} chat--${
+          state.videoPath ? 'video-visible' : 'video-not-visible'
+        } chat--${
+          state.activeContent[state.activeChannelId]
+            ? 'content-visible'
+            : 'content-not-visible'
+        } ${fullscreenMode}`}
         data-no-instant
+        aria-expanded={state.expanded}
       >
         {this.renderChatChannels()}
-        <div className="chat__activechat">
-          {vid}
-          {this.renderActiveChatChannel(channelHeader, incomingCall)}
+        <div data-testid="active-chat" className="chat__activechat">
+          {this.renderActiveChatChannel(channelHeader)}
         </div>
       </div>
     );

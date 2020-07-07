@@ -36,9 +36,8 @@ function addReadingListCountToHomePage() {
   var readingListCount;
   if (user && document.getElementById('reading-list-count')) {
     readingListCount =
-      user.reading_list_ids.length > 0 ? user.reading_list_ids.length : 'empty';
-    document.getElementById('reading-list-count').innerHTML =
-      '(' + readingListCount + ')';
+      user.reading_list_ids.length > 0 ? user.reading_list_ids.length : '';
+    document.getElementById('reading-list-count').innerHTML = readingListCount;
     document.getElementById('reading-list-count').dataset.count =
       user.reading_list_ids.length;
   }
@@ -49,9 +48,7 @@ function reactToReadingListButtonClick(event) {
   var userStatus;
   event.preventDefault();
   sendHapticMessage('medium');
-  userStatus = document
-    .getElementsByTagName('body')[0]
-    .getAttribute('data-user-status');
+  userStatus = document.body.getAttribute('data-user-status');
   if (userStatus === 'logged-out') {
     showModal('add-to-readinglist-from-index');
     return;
@@ -60,9 +57,9 @@ function reactToReadingListButtonClick(event) {
   renderOptimisticResult(button);
   getCsrfToken()
     .then(sendFetch('reaction-creation', buttonFormData(button)))
-    .then(function(response) {
+    .then(function (response) {
       if (response.status === 200) {
-        return response.json().then(function(json) {
+        return response.json().then(function (json) {
           renderButtonState(button, json);
           renderNewSidebarCount(button, json);
         });
@@ -70,7 +67,7 @@ function reactToReadingListButtonClick(event) {
       // there's currently no errorCb.
       // }
     })
-    .catch(function(error) {
+    .catch(function (error) {
       // there's currently no error handling.
     });
 }
@@ -94,8 +91,7 @@ function renderNewSidebarCount(button, json) {
     newCount = count - 1;
   }
   document.getElementById('reading-list-count').dataset.count = newCount;
-  document.getElementById('reading-list-count').innerHTML =
-    '(' + newCount + ')';
+  document.getElementById('reading-list-count').innerHTML = newCount;
 }
 
 function buttonFormData(button) {
@@ -128,16 +124,16 @@ function properButtonFromEvent(event) {
 */
 function addHoverEffectToReadingListButtons() {
   var articlesList = document.getElementsByClassName('articles-list');
-  Array.from(articlesList).forEach(function(container) {
+  Array.from(articlesList).forEach(function (container) {
     // we use `bind` so that the event handler will have the correct text in its
     // `this` local variable
     container.addEventListener(
       'mouseover',
-      readingListButtonMouseHandler.bind('UNSAVE'),
+      readingListButtonMouseHandler.bind('Unsave'),
     );
     container.addEventListener(
       'mouseout',
-      readingListButtonMouseHandler.bind('SAVED'),
+      readingListButtonMouseHandler.bind('Saved'),
     );
   });
 }

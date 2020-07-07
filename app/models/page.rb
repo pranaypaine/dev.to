@@ -1,5 +1,5 @@
 class Page < ApplicationRecord
-  TEMPLATE_OPTIONS = %w[contained full_within_layout].freeze
+  TEMPLATE_OPTIONS = %w[contained full_within_layout json].freeze
 
   validates :title, presence: true
   validates :description, presence: true
@@ -13,9 +13,14 @@ class Page < ApplicationRecord
   before_validation :set_default_template
 
   mount_uploader :social_image, ProfileImageUploader
+  resourcify
 
   def path
     is_top_level_path ? "/#{slug}" : "/page/#{slug}"
+  end
+
+  def feature_flag_name
+    "page_#{slug}"
   end
 
   private
@@ -34,7 +39,7 @@ class Page < ApplicationRecord
   end
 
   def body_present
-    errors.add(:body_markdown, "must exist if body_html doesn't exist.") if body_markdown.blank? && body_html.blank?
+    errors.add(:body_markdown, "must exist if body_html or body_json doesn't exist.") if body_markdown.blank? && body_html.blank? && body_json.blank?
   end
 
   def unique_slug_including_users_and_orgs

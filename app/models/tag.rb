@@ -33,11 +33,18 @@ class Tag < ActsAsTaggableOn::Tag
 
   after_commit :bust_cache
   after_commit :index_to_elasticsearch, on: %i[create update]
+  after_commit :sync_related_elasticsearch_docs, on: [:update]
   after_commit :remove_from_elasticsearch, on: [:destroy]
+
+  scope :eager_load_serialized_data, -> {}
 
   include Searchable
   SEARCH_SERIALIZER = Search::TagSerializer
   SEARCH_CLASS = Search::Tag
+  DATA_SYNC_CLASS = DataSync::Elasticsearch::Tag
+
+  # This model doesn't inherit from ApplicationRecord so this has to be included
+  include Purgeable
 
   # possible social previews templates for articles with a particular tag
   def self.social_preview_templates
@@ -69,9 +76,16 @@ class Tag < ActsAsTaggableOn::Tag
     tag.alias_for.presence || tag.name
   end
 
+  def self.find_preferred_alias_for(word)
+    find_by(name: word.downcase)&.alias_for.presence || word.downcase
+  end
+
   def validate_name
     errors.add(:name, "is too long (maximum is 30 characters)") if name.length > 30
-    errors.add(:name, "contains non-alphanumeric characters") unless name.match?(/\A[[:alnum:]]+\z/)
+    # [:alnum:] is not used here because it supports diacritical characters.
+    # If we decide to allow diacritics in the future, we should replace the
+    # following regex with [:alnum:].
+    errors.add(:name, "contains non-ASCII characters") unless name.match?(/\A[[a-z0-9]]+\z/i)
   end
 
   def mod_chat_channel

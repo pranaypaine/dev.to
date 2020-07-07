@@ -7,9 +7,10 @@ RSpec.describe Search::FeedContent, type: :service do
     expect(described_class::MAPPINGS).not_to be_nil
   end
 
-  describe "::search_documents", elasticsearch: true do
-    let(:article1) { create(:article) }
-    let(:article2) { create(:article) }
+  describe "::search_documents", elasticsearch: "FeedContent" do
+    let(:article1) { create(:article, published_at: 1.day.ago) }
+    let(:article2) { create(:article, published_at: 2.days.ago) }
+    let(:article3) { create(:article, published_at: Time.current) }
 
     it "parses feed content document hits from search response" do
       mock_search_response = { "hits" => { "hits" => {} } }
@@ -20,14 +21,14 @@ RSpec.describe Search::FeedContent, type: :service do
 
     it "returns highlighted fields" do
       allow(article1).to receive(:body_text).and_return("I love ruby")
-      allow(article2).to receive(:body_text).and_return("Ruby Tuesday is yummy")
+      allow(article2).to receive(:body_text).and_return("Ruby Tuesday is love")
       index_documents([article1, article2])
       query_params = { size: 5, search_fields: "love ruby" }
 
       feed_docs = described_class.search_documents(params: query_params)
       expect(feed_docs.count).to eq(2)
       doc_highlights = feed_docs.map { |t| t.dig("highlight", "body_text") }.flatten
-      expect(doc_highlights).to include("I <em>love</em> <em>ruby</em>", "<em>Ruby</em> Tuesday is yummy")
+      expect(doc_highlights).to include("I <mark>love</mark> <mark>ruby</mark>", "<mark>Ruby</mark> Tuesday is <mark>love</mark>")
     end
 
     it "returns fields necessary for the view" do
@@ -46,6 +47,32 @@ RSpec.describe Search::FeedContent, type: :service do
       expect(feed_doc["user"].keys).to include(*user_keys)
       expect(feed_doc["flare_tag"].keys).to include(*flare_tag_keys)
       expect(feed_doc["podcast"].keys).to include(*podcast_keys)
+    end
+
+    context "with chronological sorting specified" do
+      before do
+        allow(article1).to receive(:title).and_return("Ruby Slippers")
+        allow(article2).to receive(:title).and_return("Ruby Tuesday")
+        allow(article3).to receive(:title).and_return("Just Ruby")
+      end
+
+      it "sorts articles from newest to oldest" do
+        index_documents([article1, article2, article3])
+        query_params = { size: 5, search_fields: "ruby", sort_by: "published_at", sort_direction: "desc" }
+
+        titles_in_order = described_class.search_documents(params: query_params).map { |doc| doc["title"] }
+
+        expect(titles_in_order).to eq ["Just Ruby", "Ruby Slippers", "Ruby Tuesday"]
+      end
+
+      it "sorts articles from oldest to newest" do
+        index_documents([article1, article2, article3])
+        query_params = { size: 5, search_fields: "ruby", sort_by: "published_at", sort_direction: "asc" }
+
+        titles_in_order = described_class.search_documents(params: query_params).map { |doc| doc["title"] }
+
+        expect(titles_in_order).to eq ["Ruby Tuesday", "Ruby Slippers", "Just Ruby"]
+      end
     end
 
     context "with a query" do
@@ -122,10 +149,26 @@ RSpec.describe Search::FeedContent, type: :service do
         expect(doc_ids).to include(article2.id)
       end
     end
+
+    context "with default sorting" do
+      it "sorts by Elasticsearch _score which is weighted based on article score" do
+        ruby_tag = create(:tag, name: "ruby")
+        allow(article1).to receive(:score).and_return(200)
+        article1.tags << ruby_tag
+        allow(article2).to receive(:score).and_return(1500)
+        article2.tags << ruby_tag
+        index_documents([article1, article2])
+        query_params = { size: 5, search_fields: "ruby" }
+
+        feed_docs = described_class.search_documents(params: query_params)
+        doc_ids = feed_docs.map { |t| t.dig("id") }
+        expect(doc_ids).to eq([article2.id, article1.id])
+      end
+    end
   end
 
-  describe "document counts" do
-    it "returns counts for each document class", elasticsearch: true do
+  describe "document counts", elasticsearch: "FeedContent" do
+    it "returns counts for each document class" do
       article = create(:article)
       comment = create(:comment)
       pde = create(:podcast_episode)

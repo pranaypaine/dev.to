@@ -1,6 +1,7 @@
 FactoryBot.define do
   factory :broadcast do
     active { true }
+    active_status_updated_at { 2.days.ago }
 
     factory :set_up_profile_broadcast do
       title          { "Welcome Notification: set_up_profile" }
@@ -17,13 +18,13 @@ FactoryBot.define do
     factory :twitter_connect_broadcast do
       title          { "Welcome Notification: twitter_connect" }
       type_of        { "Welcome" }
-      processed_html { "You're on a roll! 🎉 Let's connect your <a href='/settings'> Twitter account</a> to complete your identity so that we don't think you're a robot. 🤖" }
+      processed_html { "You're on a roll! 🎉 Do you have a Twitter account? Consider <a href='/settings'>connecting it</a> so we can @mention you if we share your post via our Twitter account <a href='https://twitter.com/thePracticalDev'>@thePracticalDev</a>." }
     end
 
     factory :github_connect_broadcast do
       title          { "Welcome Notification: github_connect" }
       type_of        { "Welcome" }
-      processed_html { "You're on a roll! 🎉 Let's connect your <a href='/settings'> GitHub account</a> to complete your identity so that we don't think you're a robot. 🤖" }
+      processed_html { "You're on a roll! 🎉  Do you have a GitHub account? Consider <a href='/settings'>connecting it</a> so you can pin any of your repos to your profile." }
     end
 
     factory :customize_ux_broadcast do
@@ -54,6 +55,22 @@ FactoryBot.define do
       title          { "Welcome Notification: discuss_and_ask" }
       type_of        { "Welcome" }
       processed_html { "Sloan here! 👋 I noticed that you haven't <a href='https://dev.to/t/explainlikeimfive'>asked a question</a> or <a href='https://dev.to/t/discuss'>started a discussion</a> yet. It's easy to do both of these; just click on 'Write a Post' in the sidebar of the tag page to get started!" }
+    end
+
+    factory :download_app_broadcast do
+      title          { "Welcome Notification: download_app" }
+      type_of        { "Welcome" }
+      processed_html { "Sloan here, with one last tip! 👋 Have you downloaded the DEV mobile app yet? Consider <a href='https://dev.to/downloads'>downloading</a> it so you can access all of your favorite DEV content on the go!" }
+    end
+
+    factory :announcement_broadcast do
+      title          { "A Very Important Announcement" }
+      type_of        { "Announcement" }
+      processed_html { "<p>Hello, World!</p>" }
+    end
+
+    trait :with_tracking do
+      processed_html { "Sloan here again! 👋 DEV is a friendly community. Why not introduce yourself by leaving a comment in <a href='/welcome' onclick='trackNotification(event)'>the welcome thread</a>!" }
     end
   end
 end

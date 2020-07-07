@@ -6,19 +6,9 @@ class Internal::UsersController < Internal::ApplicationController
   end
 
   def index
-    @users = case params[:state]
-             when /role\-/
-               User.with_role(params[:state].split("-")[1], :any).page(params[:page]).per(50)
-             else
-               User.order("created_at DESC").page(params[:page]).per(50)
-             end
-    return if params[:search].blank?
-
-    @users = @users.where('users.name ILIKE :search OR
-      users.username ILIKE :search OR
-      users.github_username ILIKE :search OR
-      users.email ILIKE :search OR
-      users.twitter_username ILIKE :search', search: "%#{params[:search].strip}%")
+    @users = Internal::UsersQuery.call(
+      options: params.permit(:role, :search),
+    ).page(params[:page]).per(50)
   end
 
   def edit
@@ -34,6 +24,7 @@ class Internal::UsersController < Internal::ApplicationController
       joins(:organization).
       order("organizations.name ASC").
       includes(:organization)
+    @last_email_verification_date = @user.email_authorizations.where.not(verified_at: nil).order("created_at DESC").first&.verified_at || "Never"
   end
 
   def update
@@ -74,7 +65,7 @@ class Internal::UsersController < Internal::ApplicationController
   def merge
     @user = User.find(params[:id])
     begin
-      Moderator::MergeUser.call_merge(admin: current_user, keep_user: @user, delete_user_id: user_params["merge_user_id"])
+      Moderator::MergeUser.call(admin: current_user, keep_user: @user, delete_user_id: user_params["merge_user_id"])
     rescue StandardError => e
       flash[:danger] = e.message
     end
@@ -109,8 +100,17 @@ class Internal::UsersController < Internal::ApplicationController
   end
 
   def send_email
-    if NotifyMailer.user_contact_email(params).deliver
-      redirect_back(fallback_location: "/users")
+    if NotifyMailer.with(params).user_contact_email.deliver_now
+      redirect_back(fallback_location: users_path)
+    else
+      flash[:danger] = "Email failed to send!"
+    end
+  end
+
+  def verify_email_ownership
+    if VerificationMailer.with(user_id: params[:user_id]).account_ownership_verification_email.deliver_now
+      flash[:success] = "Email Verification Mailer sent!"
+      redirect_back(fallback_location: internal_users_path)
     else
       flash[:danger] = "Email failed to send!"
     end
@@ -148,13 +148,13 @@ class Internal::UsersController < Internal::ApplicationController
   def add_org_credits
     org = Organization.find(user_params[:organization_id])
     amount = user_params[:add_org_credits].to_i
-    Credit.add_to_org(org, amount)
+    Credit.add_to(org, amount)
   end
 
   def remove_org_credits
     org = Organization.find(user_params[:organization_id])
     amount = user_params[:remove_org_credits].to_i
-    Credit.remove_from_org(org, amount)
+    Credit.remove_from(org, amount)
   end
 
   def user_params

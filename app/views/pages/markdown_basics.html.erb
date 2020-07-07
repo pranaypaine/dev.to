@@ -3,8 +3,7 @@
 <%= content_for :page_meta do %>
   <link rel="canonical" href="<%= app_url("/p/markdown_basics") %>" />
   <meta name="description" content="dev.to | markdown basics">
-  <meta name="keywords" content="software development,engineering,rails,javascript,ruby">
-
+  <meta name="keywords" content="<%= SiteConfig.meta_keywords[:default] %>">
 <% end %>
 
 <div class="blank-space"></div>
@@ -42,7 +41,7 @@
 
     <h2><strong><u>Liquid Tags</u></strong></h2>
     <p>We support native
-      <a href="https://shopify.github.io/liquid/" target="_blank" rel="noopener">Liquid tags</a> in our editor, but have created our own custom tags listed below:
+      <a href="https://shopify.github.io/liquid" target="_blank" rel="noopener">Liquid tags</a> in our editor, but have created our own custom tags listed below:
     </p>
 
     <h3><strong>Twitter Embed</strong></h3>

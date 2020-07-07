@@ -1,7 +1,18 @@
+@import '../crayons';
+@import '../scaffolds';
 @import '../variables';
 
 #siteConfigBodyContainer {
   padding: 20px;
+}
+
+#siteConfig .card-header {
+  cursor: pointer;
+}
+
+#siteConfig .card-header__toggle {
+  font-size: 12px;
+  color: var(--secondary);
 }
 
 .pagination {
@@ -17,9 +28,9 @@
 }
 
 .buffer-cell {
-    /* Max-width derived from width of a Bootstrap container */
-    max-width: 1140px;
-    word-wrap: break-word;
+  /* Max-width derived from width of a Bootstrap container */
+  max-width: 1140px;
+  word-wrap: break-word;
 }
 
 .bg-featured {
@@ -38,6 +49,12 @@
 
 .border-highlighted {
   border: 20px solid black;
+}
+
+.broadcast-wrapper {
+  display: flex;
+  position: relative;
+  z-index: auto;
 }
 
 .sidebar-nav {
@@ -61,4 +78,8 @@
   .sidebar-nav-item.active {
     background: $light-medium-gray;
   }
+}
+
+body {
+  padding-top: 0;
 }

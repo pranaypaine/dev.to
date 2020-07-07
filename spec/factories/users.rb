@@ -19,15 +19,22 @@ FactoryBot.define do
     saw_onboarding               { true }
     checked_code_of_conduct      { true }
     checked_terms_and_conditions { true }
+    display_announcements        { true }
     signup_cta_variant           { "navbar_basic" }
     email_digest_periodic        { false }
+    bg_color_hex                 { Faker::Color.hex_color }
+    text_color_hex               { Faker::Color.hex_color }
 
     trait :with_identity do
-      transient { identities { %i[github twitter] } }
+      transient { identities { Authentication::Providers.available } }
 
       after(:create) do |user, options|
         options.identities.each do |provider|
-          create(:identity, user: user, provider: provider)
+          auth = OmniAuth.config.mock_auth.fetch(provider.to_sym)
+          create(
+            :identity,
+            user: user, provider: provider, uid: auth.uid, auth_data_dump: auth,
+          )
         end
       end
     end
@@ -65,10 +72,6 @@ FactoryBot.define do
 
     trait :banned do
       after(:build) { |user| user.add_role(:banned) }
-    end
-
-    trait :video_permission do
-      after(:build) { |user| user.created_at = 3.weeks.ago }
     end
 
     trait :ignore_mailchimp_subscribe_callback do
@@ -120,17 +123,40 @@ FactoryBot.define do
       end
     end
 
-    trait :with_pro_membership do
-      after(:create) do |user|
-        create(:pro_membership, user: user)
-      end
-    end
-
     trait :tag_moderator do
       after(:create) do |user|
         tag = create(:tag)
         user.add_role :tag_moderator, tag
       end
+    end
+
+    trait :with_user_optional_fields do
+      after(:create) do |user|
+        create(:user_optional_field, user: user)
+        create(:user_optional_field, user: user, label: "another field1", value: "another value1")
+        create(:user_optional_field, user: user, label: "another field2", value: "another value2")
+      end
+    end
+
+    trait :with_all_info do
+      education { "DEV University" }
+      employment_title { "Software Engineer" }
+      employer_name { "DEV" }
+      employer_url { "http://dev.to" }
+      currently_learning { "Preact" }
+      mostly_work_with { "Ruby" }
+      currently_hacking_on { "JSON-LD" }
+      mastodon_url { "https://mastodon.social/@test" }
+      facebook_url { "www.facebook.com/example" }
+      linkedin_url { "www.linkedin.com/company/example" }
+      youtube_url { "https://youtube.com/example" }
+      behance_url { "www.behance.net/#{username}" }
+      stackoverflow_url { "www.stackoverflow.com/example" }
+      dribbble_url { "www.dribbble.com/example" }
+      medium_url { "www.medium.com/example" }
+      gitlab_url { "www.gitlab.com/example" }
+      instagram_url { "www.instagram.com/example" }
+      twitch_username { "Example007" }
     end
   end
 end

@@ -1,16 +1,17 @@
 require "rails_helper"
 
-RSpec.describe "Admin awards badges", type: :system do
+RSpec.describe "Admin manages reports", type: :system do
   let(:admin) { create(:user, :super_admin) }
 
   def clear_search_boxes
     fill_in "q_reporter_username_cont", with: ""
     fill_in "q_reported_url_cont", with: ""
+    select "", from: "q_status_eq"
   end
 
   before do
     sign_in admin
-    visit "/internal/reports"
+    visit internal_feedback_messages_path
   end
 
   it "loads the view" do
@@ -32,6 +33,7 @@ RSpec.describe "Admin awards badges", type: :system do
     it "searches reports" do
       fill_in "q_reporter_username_cont", with: user.username.to_s
       click_on "Search"
+
       expect(page).to have_css("#edit_feedback_message_#{feedback_message.id}")
       expect(page).not_to have_css("#edit_feedback_message_#{feedback_message3.id}")
 
@@ -45,6 +47,7 @@ RSpec.describe "Admin awards badges", type: :system do
     it "filters by reports by status" do
       select "Invalid", from: "q[status_eq]"
       click_on "Search"
+
       expect(page).not_to have_css("#edit_feedback_message_#{feedback_message.id}")
       expect(page).not_to have_css("#edit_feedback_message_#{feedback_message3.id}")
       expect(page).to have_css("#edit_feedback_message_#{feedback_message2.id}")

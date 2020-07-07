@@ -32,7 +32,9 @@ class RssReader
     private
 
     def get_tags
-      @categories.first(4).map { |tag| tag.lstrip[0..19] }.join(",")
+      @categories.first(4).map do |tag|
+        tag.delete(" ").gsub(/[^[:alnum:]]/i, "")[0..19]
+      end.join(",")
     end
 
     def assemble_body_markdown
@@ -80,7 +82,7 @@ class RssReader
           return nil unless real_link.include?("gist.github.com")
 
           iframe.name = "p"
-          iframe.keys.each { |attr| iframe.remove_attribute(attr) }
+          iframe.keys.each { |attr| iframe.remove_attribute(attr) } # rubocop:disable Style/HashEachMethods
           iframe.inner_html = "{% gist #{real_link} %}"
         end
       end
@@ -94,10 +96,10 @@ class RssReader
         bq_with_p = bq.css("p")
         next if bq_with_p.empty?
 
-        second_content = bq_with_p.css("p")[1].css("a")[0].attributes["href"].value
-        if bq_with_p.length == 2 && second_content.include?("twitter.com")
+        if (tweet_link = bq_with_p.css("a[href*='twitter.com']"))
           bq.name = "p"
-          tweet_id = second_content.scan(/\/status\/(\d{10,})/).flatten.first
+          tweet_url = tweet_link.attribute("href").value
+          tweet_id = tweet_url.split("/status/").last
           bq.inner_html = "{% tweet #{tweet_id} %}"
         end
       end
@@ -116,7 +118,7 @@ class RssReader
         if /youtube\.com/.match?(iframe.attributes["src"].value)
           iframe.name = "p"
           youtube_id = iframe.attributes["src"].value.scan(/embed%2F(.{4,11})/).flatten.first
-          iframe.keys.each { |attr| iframe.remove_attribute(attr) }
+          iframe.keys.each { |attr| iframe.remove_attribute(attr) } # rubocop:disable Style/HashEachMethods
           iframe.inner_html = "{% youtube #{youtube_id} %}"
         end
       end
@@ -124,8 +126,14 @@ class RssReader
 
     def clean_relative_path!(html_doc, url)
       html_doc.css("img").each do |img_tag|
-        path = img_tag.attributes["src"].value
-        img_tag.attributes["src"].value = URI.join(url, path).to_s if path.start_with? "/"
+        path = (img_tag.attributes["src"] || img_tag.attributes["data-src"])&.value
+        next unless path
+
+        # Only update source if the path is not already an URL
+        unless path.match?(/\A#{URI::DEFAULT_PARSER.make_regexp}\z/)
+          resource = path.start_with?("/") ? url : @feed_source_url
+          img_tag.attributes["src"].value = URI.join(resource, path).to_s
+        end
       end
     end
 
